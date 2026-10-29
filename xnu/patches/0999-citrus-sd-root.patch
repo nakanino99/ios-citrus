@@ -12,10 +12,10 @@ index c2864ab..62d0131 100644
  bsd/dev/redwood_apple80211.c	standard
 diff --git b/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
 new file mode 100644
-index 0000000..11fc280
+index 0000000..9c78b04
 --- /dev/null
 +++ b/bsd/dev/sweet_sd.c
-@@ -0,0 +1,466 @@
+@@ -0,0 +1,469 @@
 +/*
 + * CITRUS: SD card root device (read-only, PIO). The shim (shim/sdprobe.c)
 + * powers the slot, enables the SDCC2 clocks and leaves the card selected,
@@ -190,6 +190,7 @@ index 0000000..11fc280
 +	sd_w16(0x30, 0x3);
 +	return 0;
 +wfail:
++	printf("SWEET SD: write failed lba 0x%llx n %u err 0x%x\n", lba, n, (unsigned)sd_r16(0x32));
 +	sd_w16(0x32, 0xffff);
 +	sd_w8(0x2f, 6);
 +	for (i = 0; i < 1000 && (sd_r8(0x2f) & 6); i++) {
@@ -279,6 +280,7 @@ index 0000000..11fc280
 +
 +	buf_setresid(bp, count);
 +	if (!(buf_flags(bp) & B_READ) && !ss.rw) {
++		printf("SWEET SD: write refused (rw off)\n");
 +		error = EROFS;
 +		goto out;
 +	}
@@ -438,11 +440,12 @@ index 0000000..11fc280
 +	}
 +	PE_parse_boot_argn("sdroot", want, sizeof(want));
 +	{
-+		uint32_t rwarg = 0;
++		uint32_t rwarg = 1;
 +		PE_parse_boot_argn("sdrw", &rwarg, sizeof(rwarg));
 +		ss.rw = (rwarg != 0);
 +	}
 +	ss.regs = ml_io_map(reg[0], reg[1]);
++	printf("SWEET SD: driver rev rw-default-1 (rw=%d)\n", ss.rw);
 +
 +	lck_mtx_lock(&sweet_sd_lock);
 +	error = sd_find_partition(want);
