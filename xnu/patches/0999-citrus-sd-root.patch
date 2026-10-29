@@ -12,10 +12,10 @@ index c2864ab..62d0131 100644
  bsd/dev/redwood_apple80211.c	standard
 diff --git b/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
 new file mode 100644
-index 0000000..06f5639
+index 0000000..11fc280
 --- /dev/null
 +++ b/bsd/dev/sweet_sd.c
-@@ -0,0 +1,385 @@
+@@ -0,0 +1,466 @@
 +/*
 + * CITRUS: SD card root device (read-only, PIO). The shim (shim/sdprobe.c)
 + * powers the slot, enables the SDCC2 clocks and leaves the card selected,
@@ -57,6 +57,7 @@ index 0000000..06f5639
 +	int bmajor, cmajor;
 +	dev_t bdev;
 +	bool ready;
++	bool rw;
 +} ss;
 +
 +static inline uint32_t sd_r32(uint32_t o) { return *(volatile uint32_t *)(ss.regs + o); }
@@ -131,6 +132,72 @@ index 0000000..06f5639
 +	return EIO;
 +}
 +
++#define SD_WTIMEOUT_NS  (10ull * NSEC_PER_SEC)
++
++static int
++sd_wait16_ns(uint32_t off, uint16_t mask, uint64_t ns)
++{
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(ns, &deadline);
++	deadline += mach_absolute_time();
++	for (;;) {
++		uint16_t v = sd_r16(off);
++		if (v & mask) {
++			return v;
++		}
++		if (mach_absolute_time() > deadline) {
++			return 0;
++		}
++		delay(1);
++	}
++}
++
++/* n <= SD_MAXN sectors to absolute sector lba (CMD25, PIO, auto CMD12) */
++static int
++sd_write_sectors(uint64_t lba, uint32_t n, const uint8_t *src)
++{
++	uint32_t i, k, w[SD_SEC / 4];
++	int st;
++
++	for (i = 0; i < 1000000 && (sd_r32(0x24) & 3); i++) {
++		delay(10);
++	}
++	if (i == 1000000) {
++		return EIO;
++	}
++	sd_w16(0x30, 0xffff);
++	sd_w16(0x32, 0xffff);
++	sd_w16(0x04, 0x7200);
++	sd_w16(0x06, (uint16_t)n);
++	sd_w32(0x08, (uint32_t)lba);
++	sd_w16(0x0c, 0x0026);
++	sd_w16(0x0e, (25 << 8) | 0x3a);
++	for (i = 0; i < n; i++) {
++		st = sd_wait16_ns(0x30, 0x8010, SD_WTIMEOUT_NS);
++		if (st == 0 || (st & 0x8000)) {
++			goto wfail;
++		}
++		sd_w16(0x30, 0x10);
++		memcpy(w, src + (size_t)i * SD_SEC, SD_SEC);
++		for (k = 0; k < SD_SEC / 4; k++) {
++			sd_w32(0x20, w[k]);
++		}
++	}
++	st = sd_wait16_ns(0x30, 0x8002, SD_WTIMEOUT_NS);
++	if (st == 0 || (st & 0x8000)) {
++		goto wfail;
++	}
++	sd_w16(0x30, 0x3);
++	return 0;
++wfail:
++	sd_w16(0x32, 0xffff);
++	sd_w8(0x2f, 6);
++	for (i = 0; i < 1000 && (sd_r8(0x2f) & 6); i++) {
++		delay(10);
++	}
++	return EIO;
++}
++
 +static int
 +sd_find_partition(const char *want)
 +{
@@ -192,7 +259,7 @@ index 0000000..06f5639
 +	if (!ss.ready) {
 +		return ENXIO;
 +	}
-+	return (flags & FWRITE) ? EROFS : 0;
++	return ((flags & FWRITE) && !ss.rw) ? EROFS : 0;
 +}
 +
 +static int
@@ -211,7 +278,7 @@ index 0000000..06f5639
 +	uint64_t part_bytes = ss.nsec * SD_SEC;
 +
 +	buf_setresid(bp, count);
-+	if (!(buf_flags(bp) & B_READ)) {
++	if (!(buf_flags(bp) & B_READ) && !ss.rw) {
 +		error = EROFS;
 +		goto out;
 +	}
@@ -234,7 +301,11 @@ index 0000000..06f5639
 +			error = EINVAL;
 +			break;
 +		}
-+		error = sd_read_sectors(ss.first + pos / SD_SEC, want / SD_SEC, (uint8_t *)vaddr + dn);
++		if (buf_flags(bp) & B_READ) {
++			error = sd_read_sectors(ss.first + pos / SD_SEC, want / SD_SEC, (uint8_t *)vaddr + dn);
++		} else {
++			error = sd_write_sectors(ss.first + pos / SD_SEC, want / SD_SEC, (const uint8_t *)vaddr + dn);
++		}
 +		if (error) {
 +			break;
 +		}
@@ -271,13 +342,15 @@ index 0000000..06f5639
 +		*o = ss.nsec;
 +		return 0;
 +	case DKIOCISWRITABLE:
-+		*f = 0;
++		*f = ss.rw ? 1 : 0;
++		return 0;
++	case DKIOCSYNCHRONIZECACHE:
 +		return 0;
 +	case DKIOCGETMAXBLOCKCOUNTREAD:
 +		*o = SD_MAXN;
 +		return 0;
 +	case DKIOCGETMAXBLOCKCOUNTWRITE:
-+		*o = 0;
++		*o = ss.rw ? SD_MAXN : 0;
 +		return 0;
 +	case DKIOCGETMAXSEGMENTCOUNTREAD:
 +	case DKIOCGETMAXSEGMENTCOUNTWRITE:
@@ -313,9 +386,12 @@ index 0000000..06f5639
 +}
 +
 +static int
-+sweet_sd_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++sweet_sd_write(dev_t dev, struct uio *uio, __unused int ioflag)
 +{
-+	return EROFS;
++	if (!ss.rw) {
++		return EROFS;
++	}
++	return physio(sweet_sd_strategy, NULL, dev, B_WRITE, minphys, uio, (int)SD_SEC);
 +}
 +
 +static const struct bdevsw sweet_sd_bdevsw = {
@@ -361,6 +437,11 @@ index 0000000..06f5639
 +		return ENXIO;
 +	}
 +	PE_parse_boot_argn("sdroot", want, sizeof(want));
++	{
++		uint32_t rwarg = 0;
++		PE_parse_boot_argn("sdrw", &rwarg, sizeof(rwarg));
++		ss.rw = (rwarg != 0);
++	}
 +	ss.regs = ml_io_map(reg[0], reg[1]);
 +
 +	lck_mtx_lock(&sweet_sd_lock);
@@ -381,8 +462,8 @@ index 0000000..06f5639
 +	devfs_make_node(ss.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdroot0");
 +	devfs_make_node(makedev(ss.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdroot0");
 +	ss.ready = true;
-+	printf("SWEET SD: \"%s\": first sector 0x%llx, %llu MiB, read-only\n",
-+	    want, ss.first, ss.nsec * SD_SEC >> 20);
++	printf("SWEET SD: \"%s\": first sector 0x%llx, %llu MiB, %s\n",
++	    want, ss.first, ss.nsec * SD_SEC >> 20, ss.rw ? "read-write" : "read-only");
 +	return 0;
 +}
 +
