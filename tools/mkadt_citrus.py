@@ -191,7 +191,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
-            ('compatible', cstr('sweet,display')),
+            ('compatible', cstr('sweet,display-disabled')),
             # --native: present the real 1080x2400 panel (needed for direct MDP scanout,
             # which must match the canvas: sweetfb_native=1 with a 1125x2436 canvas makes
             # backboardd ask for a hardware scaler that does not exist)
@@ -212,6 +212,12 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         ph(),
         ('compatible', cstr('qcom,ufshc')),
         ('reg', u64(UFS, UFS_SIZE)),
+    ])
+
+    sdnode = node('sweet-sd', [
+        ph(),
+        ('compatible', cstr('qcom,sdhci-msm')),
+        ('reg', u64(0x04784000, 0x1000)),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -250,7 +256,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs]))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product + ([] if qemu else [ufs, sdnode]))
 
 
 if __name__ == '__main__':

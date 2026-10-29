@@ -1,0 +1,428 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index c2864ab..62d0131 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -105,6 +105,7 @@ bsd/dev/random/randomdev.c		standard
+ 
+ bsd/dev/memdev.c			standard
+ bsd/dev/sweet_ufs.c			standard
++bsd/dev/sweet_sd.c			standard
+ bsd/dev/redwood_sta.c		standard
+ bsd/dev/redwood_net.c		standard
+ bsd/dev/redwood_apple80211.c	standard
+diff --git b/bsd/dev/sweet_sd.c b/bsd/dev/sweet_sd.c
+new file mode 100644
+index 0000000..06f5639
+--- /dev/null
++++ b/bsd/dev/sweet_sd.c
+@@ -0,0 +1,385 @@
++/*
++ * CITRUS: SD card root device (read-only, PIO). The shim (shim/sdprobe.c)
++ * powers the slot, enables the SDCC2 clocks and leaves the card selected,
++ * 4 bit, 25 MHz. This driver only issues CMD18 reads. Root with rd=sdroot0,
++ * GPT partition name from boot-arg sdroot= (default "iosroot").
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/buf.h>
++#include <sys/conf.h>
++#include <sys/disk.h>
++#include <sys/errno.h>
++#include <sys/proc.h>
++#include <sys/uio.h>
++#include <miscfs/devfs/devfs.h>
++#include <kern/locks.h>
++#include <kern/clock.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <libkern/libkern.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++#define SD_SEC          512u
++#define SD_MAXN         1024u
++#define SD_TIMEOUT_NS   (2ull * NSEC_PER_SEC)
++
++static LCK_GRP_DECLARE(sweet_sd_grp, "sweet_sd");
++static LCK_MTX_DECLARE(sweet_sd_lock, &sweet_sd_grp);
++
++static struct {
++	vm_offset_t regs;
++	uint64_t first, nsec;
++	int bmajor, cmajor;
++	dev_t bdev;
++	bool ready;
++} ss;
++
++static inline uint32_t sd_r32(uint32_t o) { return *(volatile uint32_t *)(ss.regs + o); }
++static inline void sd_w32(uint32_t o, uint32_t v) { *(volatile uint32_t *)(ss.regs + o) = v; }
++static inline uint16_t sd_r16(uint32_t o) { return *(volatile uint16_t *)(ss.regs + o); }
++static inline void sd_w16(uint32_t o, uint16_t v) { *(volatile uint16_t *)(ss.regs + o) = v; }
++static inline uint8_t sd_r8(uint32_t o) { return *(volatile uint8_t *)(ss.regs + o); }
++static inline void sd_w8(uint32_t o, uint8_t v) { *(volatile uint8_t *)(ss.regs + o) = v; }
++
++/* wait until any bit of mask is set in the 16-bit register; 0 on timeout */
++static int
++sd_wait16(uint32_t off, uint16_t mask)
++{
++	uint64_t deadline;
++	nanoseconds_to_absolutetime(SD_TIMEOUT_NS, &deadline);
++	deadline += mach_absolute_time();
++	for (;;) {
++		uint16_t v = sd_r16(off);
++		if (v & mask) {
++			return v;
++		}
++		if (mach_absolute_time() > deadline) {
++			return 0;
++		}
++		delay(1);
++	}
++}
++
++/* n <= SD_MAXN sectors from absolute sector lba (SDHC: block addressing) */
++static int
++sd_read_sectors(uint64_t lba, uint32_t n, uint8_t *dst)
++{
++	uint32_t i, k, w[SD_SEC / 4];
++	int st;
++
++	for (i = 0; i < 100000 && (sd_r32(0x24) & 3); i++) {
++		delay(10);
++	}
++	if (i == 100000) {
++		return EIO;
++	}
++	sd_w16(0x30, 0xffff);
++	sd_w16(0x32, 0xffff);
++	sd_w16(0x04, 0x7200);
++	sd_w16(0x06, (uint16_t)n);
++	sd_w32(0x08, (uint32_t)lba);
++	sd_w16(0x0c, 0x0036);
++	sd_w16(0x0e, (18 << 8) | 0x3a);
++	for (i = 0; i < n; i++) {
++		st = sd_wait16(0x30, 0x8020);
++		if (st == 0 || (st & 0x8000)) {
++			goto fail;
++		}
++		sd_w16(0x30, 0x20);
++		for (k = 0; k < SD_SEC / 4; k++) {
++			w[k] = sd_r32(0x20);
++		}
++		memcpy(dst + (size_t)i * SD_SEC, w, SD_SEC);
++	}
++	st = sd_wait16(0x30, 0x8002);
++	if (st == 0 || (st & 0x8000)) {
++		goto fail;
++	}
++	sd_w16(0x30, 0x3);
++	return 0;
++fail:
++	sd_w16(0x32, 0xffff);
++	sd_w8(0x2f, 6);
++	for (i = 0; i < 1000 && (sd_r8(0x2f) & 6); i++) {
++		delay(10);
++	}
++	return EIO;
++}
++
++static int
++sd_find_partition(const char *want)
++{
++	static uint8_t gpt[16384];
++	uint8_t hdr[SD_SEC];
++	uint64_t entry_lba;
++	uint32_t nent, esz;
++	int error = sd_read_sectors(1, 1, hdr);
++	if (error) {
++		return error;
++	}
++	if (memcmp(hdr, "EFI PART", 8) != 0) {
++		printf("SWEET SD: no GPT\n");
++		return ENXIO;
++	}
++	memcpy(&entry_lba, hdr + 72, 8);
++	memcpy(&nent, hdr + 80, 4);
++	memcpy(&esz, hdr + 84, 4);
++	if (esz != 128 || nent == 0 || nent * esz > sizeof(gpt)) {
++		printf("SWEET SD: unsupported GPT entries %u x %u\n", nent, esz);
++		return ENXIO;
++	}
++	error = sd_read_sectors(entry_lba, (nent * esz + SD_SEC - 1) / SD_SEC, gpt);
++	if (error) {
++		return error;
++	}
++	for (uint32_t i = 0; i < nent; i++) {
++		const uint8_t *e = gpt + i * esz;
++		char name[37];
++		unsigned c;
++		for (c = 0; c < 36; c++) {
++			uint16_t ch = (uint16_t)(e[56 + 2 * c] | e[57 + 2 * c] << 8);
++			if (ch == 0 || ch > 0x7f) {
++				break;
++			}
++			name[c] = (char)ch;
++		}
++		name[c] = 0;
++		if (strcmp(name, want) != 0) {
++			continue;
++		}
++		uint64_t first, last;
++		memcpy(&first, e + 32, 8);
++		memcpy(&last, e + 40, 8);
++		if (last < first) {
++			return ENXIO;
++		}
++		ss.first = first;
++		ss.nsec = last - first + 1;
++		return 0;
++	}
++	printf("SWEET SD: no GPT partition named \"%s\"\n", want);
++	return ENOENT;
++}
++
++static int
++sweet_sd_open(__unused dev_t dev, int flags, __unused int devtype, __unused struct proc *p)
++{
++	if (!ss.ready) {
++		return ENXIO;
++	}
++	return (flags & FWRITE) ? EROFS : 0;
++}
++
++static int
++sweet_sd_close(__unused dev_t dev, __unused int flags, __unused int devtype, __unused struct proc *p)
++{
++	return 0;
++}
++
++static void
++sweet_sd_strategy(buf_t bp)
++{
++	int error = 0;
++	caddr_t vaddr = NULL;
++	uint64_t off = (uint64_t)buf_blkno(bp) * SD_SEC;
++	uint32_t count = buf_count(bp);
++	uint64_t part_bytes = ss.nsec * SD_SEC;
++
++	buf_setresid(bp, count);
++	if (!(buf_flags(bp) & B_READ)) {
++		error = EROFS;
++		goto out;
++	}
++	if (off > part_bytes || count > part_bytes - off) {
++		error = EINVAL;
++		goto out;
++	}
++	if (count == 0) {
++		goto out;
++	}
++	if (buf_map(bp, &vaddr)) {
++		error = EIO;
++		goto out;
++	}
++	lck_mtx_lock(&sweet_sd_lock);
++	for (uint32_t dn = 0; dn < count;) {
++		uint64_t pos = off + dn;
++		uint32_t want = MIN(count - dn, SD_MAXN * SD_SEC);
++		if ((pos | want) & (SD_SEC - 1)) {
++			error = EINVAL;
++			break;
++		}
++		error = sd_read_sectors(ss.first + pos / SD_SEC, want / SD_SEC, (uint8_t *)vaddr + dn);
++		if (error) {
++			break;
++		}
++		dn += want;
++		buf_setresid(bp, count - dn);
++	}
++	lck_mtx_unlock(&sweet_sd_lock);
++	buf_unmap(bp);
++out:
++	if (error) {
++		buf_seterror(bp, error);
++	}
++	buf_biodone(bp);
++}
++
++static int
++sweet_sd_ioctl(__unused dev_t dev, u_long cmd, caddr_t data, __unused int flag,
++    __unused struct proc *p, int is_char)
++{
++	uint32_t *f = (uint32_t *)data;
++	uint64_t *o = (uint64_t *)data;
++
++	switch (cmd) {
++	case DKIOCGETBLOCKSIZE:
++	case DKIOCGETPHYSICALBLOCKSIZE:
++		*f = SD_SEC;
++		return 0;
++	case DKIOCSETBLOCKSIZE:
++		if (is_char) {
++			return ENODEV;
++		}
++		return (*f == SD_SEC) ? 0 : EINVAL;
++	case DKIOCGETBLOCKCOUNT:
++		*o = ss.nsec;
++		return 0;
++	case DKIOCISWRITABLE:
++		*f = 0;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTREAD:
++		*o = SD_MAXN;
++		return 0;
++	case DKIOCGETMAXBLOCKCOUNTWRITE:
++		*o = 0;
++		return 0;
++	case DKIOCGETMAXSEGMENTCOUNTREAD:
++	case DKIOCGETMAXSEGMENTCOUNTWRITE:
++		*o = 1;
++		return 0;
++	default:
++		return ENOTTY;
++	}
++}
++
++static int
++sweet_sd_bioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_sd_ioctl(dev, cmd, data, flag, p, 0);
++}
++
++static int
++sweet_sd_cioctl(dev_t dev, u_long cmd, caddr_t data, int flag, struct proc *p)
++{
++	return sweet_sd_ioctl(dev, cmd, data, flag, p, 1);
++}
++
++static int
++sweet_sd_psize(__unused dev_t dev)
++{
++	return ss.ready ? (int)MIN(ss.nsec, INT_MAX) : -1;
++}
++
++static int
++sweet_sd_read(dev_t dev, struct uio *uio, __unused int ioflag)
++{
++	return physio(sweet_sd_strategy, NULL, dev, B_READ, minphys, uio, (int)SD_SEC);
++}
++
++static int
++sweet_sd_write(__unused dev_t dev, __unused struct uio *uio, __unused int ioflag)
++{
++	return EROFS;
++}
++
++static const struct bdevsw sweet_sd_bdevsw = {
++	.d_open     = sweet_sd_open,
++	.d_close    = sweet_sd_close,
++	.d_strategy = sweet_sd_strategy,
++	.d_ioctl    = sweet_sd_bioctl,
++	.d_dump     = eno_dump,
++	.d_psize    = sweet_sd_psize,
++	.d_type     = D_DISK,
++};
++
++static const struct cdevsw sweet_sd_cdevsw = {
++	.d_open       = sweet_sd_open,
++	.d_close      = sweet_sd_close,
++	.d_read       = sweet_sd_read,
++	.d_write      = sweet_sd_write,
++	.d_ioctl      = sweet_sd_cioctl,
++	.d_stop       = eno_stop,
++	.d_reset      = eno_reset,
++	.d_ttys       = NULL,
++	.d_select     = eno_select,
++	.d_mmap       = eno_mmap,
++	.d_strategy   = eno_strat,
++	.d_reserved_1 = eno_getc,
++	.d_reserved_2 = eno_putc,
++	.d_type       = D_DISK,
++};
++
++static int
++sweet_sd_init(void)
++{
++	DTEntry node;
++	uintptr_t const *reg = NULL;
++	unsigned int size = 0;
++	char want[64] = "iosroot";
++	int error;
++
++	if (SecureDTLookupEntry(NULL, "/sweet-sd", &node) != kSuccess ||
++	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
++	    size < 2 * sizeof(uintptr_t)) {
++		printf("SWEET SD: no /sweet-sd node in the device tree\n");
++		return ENXIO;
++	}
++	PE_parse_boot_argn("sdroot", want, sizeof(want));
++	ss.regs = ml_io_map(reg[0], reg[1]);
++
++	lck_mtx_lock(&sweet_sd_lock);
++	error = sd_find_partition(want);
++	lck_mtx_unlock(&sweet_sd_lock);
++	if (error) {
++		return error;
++	}
++	ss.bmajor = bdevsw_add(-1, &sweet_sd_bdevsw);
++	if (ss.bmajor < 0) {
++		return ENXIO;
++	}
++	ss.cmajor = cdevsw_add_with_bdev(-1, &sweet_sd_cdevsw, ss.bmajor);
++	if (ss.cmajor < 0) {
++		return ENXIO;
++	}
++	ss.bdev = makedev(ss.bmajor, 0);
++	devfs_make_node(ss.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "sdroot0");
++	devfs_make_node(makedev(ss.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rsdroot0");
++	ss.ready = true;
++	printf("SWEET SD: \"%s\": first sector 0x%llx, %llu MiB, read-only\n",
++	    want, ss.first, ss.nsec * SD_SEC >> 20);
++	return 0;
++}
++
++int sweet_sd_rootdev(dev_t *dev);
++
++int
++sweet_sd_rootdev(dev_t *dev)
++{
++	if (!ss.ready) {
++		int error = sweet_sd_init();
++		if (error) {
++			return error;
++		}
++	}
++	*dev = ss.bdev;
++	return 0;
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index e6c74aa..39e550a 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -783,6 +783,20 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 		goto iofrootx;
+ 	}
+ #endif
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	if (strcmp(rdBootVar, "sdroot0") == 0) {
++		extern int sweet_sd_rootdev(dev_t *dev);
++		OSSafeReleaseNULL(matching);
++		int sd_error = sweet_sd_rootdev(root);
++		if (sd_error) {
++			panic("IOFindBSDRoot: SWEET SD root %s unavailable: %d", rdBootVar, sd_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++#endif
+ 
+ //
+ //	Now check if we are trying to root on a memory device
