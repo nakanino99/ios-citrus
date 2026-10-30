@@ -191,7 +191,7 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         node('disp0', [
             ph(),
             ('device_type', cstr('display-subsystem')),
-            ('compatible', cstr('sweet,display-disabled')),
+            ('compatible', cstr('sweet,display')),
             # --native: present the real 1080x2400 panel (needed for direct MDP scanout,
             # which must match the canvas: sweetfb_native=1 with a 1125x2436 canvas makes
             # backboardd ask for a hardware scaler that does not exist)
