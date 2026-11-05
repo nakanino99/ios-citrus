@@ -4,19 +4,27 @@ on:
     paths: ['.github/workflows/runner-test.yml']
   workflow_dispatch:
 jobs:
-  m14:
-    runs-on: macos-14
-    steps:
-      - run: sw_vers
   m15:
     runs-on: macos-15
     steps:
-      - run: sw_vers
+      - run: |
+          sw_vers
+          uname -m
+          ls -d /Applications/Xcode*.app
+          xcodebuild -version
   mlatest:
     runs-on: macos-latest
     steps:
-      - run: sw_vers
-  linux:
-    runs-on: ubuntu-latest
+      - run: |
+          sw_vers
+          uname -m
+          ls -d /Applications/Xcode*.app
+          xcodebuild -version
+  m15intel:
+    runs-on: macos-15-intel
     steps:
-      - run: uname -a
+      - run: |
+          sw_vers
+          uname -m
+          ls -d /Applications/Xcode*.app
+          xcodebuild -version
