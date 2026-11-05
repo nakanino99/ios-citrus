@@ -1,0 +1,72 @@
+diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
+index 16da336..1ef20df 100644
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -64,7 +64,7 @@ uint32_t gpu_log;
+ #define SMMU_BASE       0x059A0000ull
+ #define SMMU_SIZE       0x10000
+ #define SMMU_CB0        0x8000
+-#define ZAP_REGION      0x55B15000ull
++#define ZAP_REGION      0x55A15000ull
+ #define ZAP_REGION_SIZE 0x2000
+ #define GPU_PAS_ID      13
+ 
+@@ -493,6 +493,7 @@ power_up(void)
+ {
+ 	power_cycle_if_on();
+ 	rmw(gcc, 0x79004, 0, 1u << 15);                 /* GPLL0 to the GPU CC */
++	branch_on(gcc, 0x36004, "gcc_gpu_cfg_ahb");   /* citrus: ABL leaves it off */
+ 	branch_on(gcc, 0x71154, "gcc_bimc_gpu_axi");
+ 	branch_on(gcc, 0x3600c, "gcc_gpu_memnoc_gfx");
+ 	branch_on(gcc, 0x36018, "gcc_gpu_snoc_dvm_gfx");
+@@ -573,11 +574,12 @@ zap_load(void)
+ 	struct kbuf meta = {};
+ 	bool ok = false;
+ 
+-	IOLog("TopazGPU: zap: embedded firmware (%zu + %zu bytes)\n", topaz_fw_zap_mdt_size, topaz_fw_zap_b02_size);
+-	mdt = (void *)topaz_fw_zap_mdt;
+-	mdt_size = topaz_fw_zap_mdt_size;
+-	seg = (void *)topaz_fw_zap_b02;
+-	seg_size = topaz_fw_zap_b02_size;
++	if (topaz_fw_read(FW_DIR "a610_zap.mdt", &mdt, &mdt_size) || topaz_fw_read(FW_DIR "a610_zap.b02", &seg, &seg_size) ||
++	    mdt_size < 52) {
++		IOLog("TopazGPU: zap files missing in " FW_DIR "\n");
++		goto out;
++	}
++	IOLog("TopazGPU: zap: loaded from " FW_DIR " (%zu + %zu bytes)\n", mdt_size, seg_size);
+ 	{
+ 		const uint8_t *m = (const uint8_t *)mdt;
+ 		uint32_t phoff = *(const uint32_t *)(m + 28), phnum = *(const uint16_t *)(m + 44);
+@@ -637,6 +639,8 @@ zap_load(void)
+ 	}
+ out:
+ 	OSSafeReleaseNULL(meta.md);
++	topaz_fw_free(mdt, mdt_size);
++	topaz_fw_free(seg, seg_size);
+ 	return ok;
+ }
+ 
+@@ -956,16 +960,21 @@ cp_start(void)
+ 	void *fw = NULL;
+ 	size_t fw_size = 0;
+ 
+-	fw = (void *)topaz_fw_sqe_fw;
+-	fw_size = topaz_fw_sqe_fw_size;
++	if (topaz_fw_read(FW_DIR "a630_sqe.fw", &fw, &fw_size) || fw_size <= 4) {
++		IOLog("TopazGPU: " FW_DIR "a630_sqe.fw missing\n");
++		topaz_fw_free(fw, fw_size);
++		return false;
++	}
+ 	IOLog("TopazGPU: cp: SQE %zu bytes, allocating ring\n", fw_size);
+ 	if ((sqe.md == NULL && (!kbuf_alloc(&sqe, fw_size - 4) || !kbuf_map(&sqe))) ||
+ 	    (ring.md == NULL && (!kbuf_alloc(&ring, RB_BYTES) || !kbuf_map(&ring))) ||
+ 	    (mem.md == NULL && (!kbuf_alloc(&mem, PAGE_SIZE) || !kbuf_map(&mem)))) {
+ 		IOLog("TopazGPU: CP buffers failed\n");
++		topaz_fw_free(fw, fw_size);
+ 		return false;
+ 	}
+ 	memcpy(sqe.va, (const uint8_t *)fw + 4, fw_size - 4);
++	topaz_fw_free(fw, fw_size);
+ 	sweet_dcache_clean((vm_offset_t)sqe.va, (unsigned)(fw_size - 4));
+ 	IOLog("TopazGPU: cp: SQE at GPU %#llx, ring %#llx\n", sqe.iova, ring.iova);
+ 	tlb_flush();

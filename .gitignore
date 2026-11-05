@@ -8,3 +8,8 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+shim/ft8719_fw.h
+shim/*.bak*
+shim/sdprobe.c.*
+shim/sdprobe.sd.c
+shim/shim.c.*
