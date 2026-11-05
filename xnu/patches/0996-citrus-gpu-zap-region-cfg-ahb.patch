@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
-index 16da336..1ef20df 100644
+index 16da336..892e0a0 100644
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -64,7 +64,7 @@ uint32_t gpu_log;
@@ -11,6 +11,15 @@ index 16da336..1ef20df 100644
  #define ZAP_REGION_SIZE 0x2000
  #define GPU_PAS_ID      13
  
+@@ -230,7 +230,7 @@ topaz_gpu_pool_md(uint64_t pa, uint64_t size)
+ }
+ 
+ /* boot-arg gpu_midmem=1: the ADT gives the kernel RAM below 4 GiB (mkadt.py --midmem), GPU memory is the kernel's */
+-static uint32_t gpu_midmem;
++static uint32_t gpu_midmem = 1;
+ extern "C" bool topaz_gpu_midmem(void);
+ bool
+ topaz_gpu_midmem(void)
 @@ -493,6 +493,7 @@ power_up(void)
  {
  	power_cycle_if_on();
