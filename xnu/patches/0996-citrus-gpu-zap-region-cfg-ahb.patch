@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
-index 16da336..892e0a0 100644
+index 16da336..854315c 100644
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -64,7 +64,7 @@ uint32_t gpu_log;
@@ -11,15 +11,6 @@ index 16da336..892e0a0 100644
  #define ZAP_REGION_SIZE 0x2000
  #define GPU_PAS_ID      13
  
-@@ -230,7 +230,7 @@ topaz_gpu_pool_md(uint64_t pa, uint64_t size)
- }
- 
- /* boot-arg gpu_midmem=1: the ADT gives the kernel RAM below 4 GiB (mkadt.py --midmem), GPU memory is the kernel's */
--static uint32_t gpu_midmem;
-+static uint32_t gpu_midmem = 1;
- extern "C" bool topaz_gpu_midmem(void);
- bool
- topaz_gpu_midmem(void)
 @@ -493,6 +493,7 @@ power_up(void)
  {
  	power_cycle_if_on();
@@ -46,7 +37,23 @@ index 16da336..892e0a0 100644
  	{
  		const uint8_t *m = (const uint8_t *)mdt;
  		uint32_t phoff = *(const uint32_t *)(m + 28), phnum = *(const uint16_t *)(m + 44);
-@@ -637,6 +639,8 @@ zap_load(void)
+@@ -605,9 +607,14 @@ zap_load(void)
+ 		}
+ 		IOLog("TopazGPU: zap: metadata at %#llx\n", meta.pa);
+ 		memcpy(meta.va, mdt, mdt_size);
++		IOLog("TopazGPU: zap: memcpy done\n");
+ 		sweet_dcache_clean((vm_offset_t)meta.va, (unsigned)mdt_size);
++		IOLog("TopazGPU: zap: cache clean done\n");
+ 		__asm__ volatile ("dsb sy" ::: "memory");
+-		scm(SCM_FN(SCM_SVC_PIL, PIL_SHUTDOWN), 1, GPU_PAS_ID, 0, 0, &res);
++		IOLog("TopazGPU: zap: calling PIL_SHUTDOWN\n");
++		st = scm(SCM_FN(SCM_SVC_PIL, PIL_SHUTDOWN), 1, GPU_PAS_ID, 0, 0, &res);
++		IOLog("TopazGPU: zap: PIL_SHUTDOWN %llx/%llx\n", st, res);
++		IOLog("TopazGPU: zap: calling PIL_INIT_IMAGE\n");
+ 		st = scm(SCM_FN(SCM_SVC_PIL, PIL_INIT_IMAGE), 2 | (SCM_ARG_RW << 6), GPU_PAS_ID, meta.pa, 0, &res);
+ 		if (st != 0 || res != 0) {
+ 			IOLog("TopazGPU: zap init_image: %llx/%llx\n", st, res);
+@@ -637,6 +644,8 @@ zap_load(void)
  	}
  out:
  	OSSafeReleaseNULL(meta.md);
@@ -55,7 +62,7 @@ index 16da336..892e0a0 100644
  	return ok;
  }
  
-@@ -956,16 +960,21 @@ cp_start(void)
+@@ -956,16 +965,21 @@ cp_start(void)
  	void *fw = NULL;
  	size_t fw_size = 0;
  
