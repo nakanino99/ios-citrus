@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 1d3ee17..6d9c557 100644
+index 1d3ee17..f332091 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -95,6 +95,17 @@ static void sweet_bl_log(const char *who, OSDictionary *d);
@@ -44,3 +44,21 @@ index 1d3ee17..6d9c557 100644
  	if (fIntf1 != NULL) {
  		volatile uint32_t *r = fIntf1 + 0x800 / 4;
  		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
+@@ -852,7 +863,7 @@ AppleCLCD::directEligible(const uint8_t *rec, SweetSurface **held)
+ 			layer = layer < 0 ? (int)i : -2;
+ 		}
+ 	}
+-	return layer >= 0 && held[layer] != NULL && held[layer]->gpuPool && !fPowerOff && !fConsShown;
++	return fCtl0 != NULL && layer >= 0 && held[layer] != NULL && held[layer]->gpuPool && !fPowerOff && !fConsShown;
+ }
+ 
+ void
+@@ -903,7 +914,7 @@ AppleCLCD::showDirect(const uint8_t *rec, SweetSurface **heldIn)
+ 		sweet_hold_set(dropped, false);
+ 		uint64_t waited = mach_absolute_time(), wns = 0;  /* (present waits for the GPU too) */
+ 		present(rec);
+-		for (int t = 0; t < 250 && (fCtl0[0x18 / 4] & 0x20001) != 0; t++) {
++		for (int t = 0; fCtl0 != NULL && t < 250 && (fCtl0[0x18 / 4] & 0x20001) != 0; t++) {
+ 			IODelay(100);                           /* until the MDP has latched it */
+ 		}
+ 		absolutetime_to_nanoseconds(mach_absolute_time() - waited, &wns);
