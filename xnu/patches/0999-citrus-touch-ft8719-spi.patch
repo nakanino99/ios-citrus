@@ -1,6 +1,8 @@
+diff --git a/bsd/dev/sweet_touch.c b/bsd/dev/sweet_touch.c
+index 370d18b..654af40 100644
 --- a/bsd/dev/sweet_touch.c
 +++ b/bsd/dev/sweet_touch.c
-@@ -614,6 +614,489 @@
+@@ -614,6 +614,492 @@ touch_se_init(void)
  	return true;
  }
  
@@ -391,12 +393,23 @@
 +	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
 +	uint32_t mask = 0;
 +	unsigned n;
-+	static unsigned logged;
-+	memset(buf, 0, sizeof(buf));
-+	if (ft_read(&c, 1, buf + 1, 14) < 0 || (buf[1] & 0xf0) != 0x90) {
-+		if (ft_read(NULL, 0, buf + 1, 62) < 0 || (buf[1] & 0xf0) != 0x90) {
-+			return EIO;
++	static unsigned logged, raw_logged;
++	memset(buf, 0xff, sizeof(buf));
++	int r = ft_read(&c, 1, buf + 1, 14);
++	if (r < 0 || (buf[1] & 0xf0) != 0x90) {
++		r = ft_read(NULL, 0, buf + 1, 60);
++	}
++	if (!ft_gp_get(FT_P_IRQ) && raw_logged < 8) {
++		raw_logged++;
++		printf("SWEET TOUCH: irq=0 r=%d hdr=%02x %02x %02x %02x %02x %02x\n",
++		    r, buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
++	}
++	if ((buf[1] & 0xf0) != 0x90) {
++		/* Idle / no touch packet: release contacts if any, do NOT treat as fatal error */
++		if (st.active) {
++			touch_report(0, x, y);
 +		}
++		return 0;
 +	}
 +	st.s_frames++;
 +	n = buf[2] & 0x0fu;
@@ -465,32 +478,24 @@
 +	st.stage = "ft8719 polling";
 +	printf("SWEET TOUCH: ft8719 running, 1080x2340, poll=10ms irq-hint=%d\n", irq_hint);
 +	for (;;) {
-+		if (!irq_hint || st.active || !ft_gp_get(FT_P_IRQ) || (++ticks % 10u) == 0) {
++		(void)ticks;
++		if (!irq_hint || st.active || !ft_gp_get(FT_P_IRQ)) {
 +			int err = ft_frame();
 +			if (err) {
 +				st.s_errs++;
-+				if ((errors++ % 100u) == 0) {
-+					printf("SWEET TOUCH: ft8719 report err=%d irq=%d\n", err, ft_gp_get(FT_P_IRQ));
-+				}
-+				if (errors == 10) {
-+					touch_report(0, st.x, st.y);    /* release after persistent bad reads */
-+				}
-+				if (errors == 30 && ft_download() == 0) {
-+					errors = 0;             /* chip fell back to ROM boot: reloaded */
-+				}
++				errors++;
 +			} else {
 +				errors = 0;
 +			}
 +		}
-+		/* a failing read spins ~35 ms in ft_idle(): back off, one CPU only */
-+		touch_wait(errors >= 10 ? 500u : 10u);
++		touch_wait(12u);
 +	}
 +}
 +
  static void
  touch_thread(void *arg, wait_result_t result)
  {
-@@ -627,6 +1110,11 @@
+@@ -627,6 +1113,11 @@ touch_thread(void *arg, wait_result_t result)
  	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
  	printf("SWEET TOUCH: starting in %u s\n", delay_s);
  	touch_wait(delay_s * 1000u);
@@ -502,7 +507,7 @@
  	st.stage = "map";
  	printf("SWEET TOUCH: mapping GCC/TLMM/SE2\n");
  	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x80000);
-@@ -750,6 +1238,7 @@
+@@ -750,6 +1241,7 @@ sweet_touch_init(void)
  	}
  	st.started = true;
  	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
