@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
-index 16da336..854315c 100644
+index 16da336..af53b95 100644
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -64,7 +64,7 @@ uint32_t gpu_log;
@@ -11,15 +11,48 @@ index 16da336..854315c 100644
  #define ZAP_REGION_SIZE 0x2000
  #define GPU_PAS_ID      13
  
-@@ -493,6 +493,7 @@ power_up(void)
+@@ -491,15 +491,17 @@ power_cycle_if_on(void)
+ static bool
+ power_up(void)
  {
- 	power_cycle_if_on();
+-	power_cycle_if_on();
  	rmw(gcc, 0x79004, 0, 1u << 15);                 /* GPLL0 to the GPU CC */
-+	branch_on(gcc, 0x36004, "gcc_gpu_cfg_ahb");   /* citrus: ABL leaves it off */
++	branch_on(gcc, 0x36004, "gcc_gpu_cfg_ahb");     /* citrus: enable before touching GPUCC */
++	power_cycle_if_on();
  	branch_on(gcc, 0x71154, "gcc_bimc_gpu_axi");
- 	branch_on(gcc, 0x3600c, "gcc_gpu_memnoc_gfx");
- 	branch_on(gcc, 0x36018, "gcc_gpu_snoc_dvm_gfx");
-@@ -573,11 +574,12 @@ zap_load(void)
+-	branch_on(gcc, 0x3600c, "gcc_gpu_memnoc_gfx");
+-	branch_on(gcc, 0x36018, "gcc_gpu_snoc_dvm_gfx");
+-	if (!gdsc_on(0x106c, 0, 0, 0x1540)) {
++	rmw(gpucc, 0x1540, 1, 0);                       /* clear gds_hw_ctrl bit 0 like shim probe */
++	if (!gdsc_on(0x106c, 0, 0, 0x106c)) {
+ 		IOLog("TopazGPU: CX GDSC: no PWR_ON\n");
+ 		return false;
+ 	}
++	branch_on(gcc, 0x3600c, "gcc_gpu_memnoc_gfx");
++	branch_on(gcc, 0x36018, "gcc_gpu_snoc_dvm_gfx");
+ 	if (!branch_on(gpucc, 0x109c, "gpucc_cxo") || !branch_on(gpucc, 0x1078, "gpucc_ahb")) {
+ 		return false;
+ 	}
+@@ -552,12 +554,18 @@ static uint64_t
+ scm(uint32_t fn, uint64_t arginfo, uint64_t a, uint64_t b, uint64_t c, uint64_t *res1)
+ {
+ 	uint64_t args[8] = { fn, arginfo, a, b, c, 0, 0, 0 };
++	uint64_t daif;
++	__asm__ volatile ("mrs %0, daif; msr daifset, #2; isb" : "=r"(daif));
+ 	smc(args);
++	__asm__ volatile ("msr daif, %0; isb" :: "r"(daif));
+ 	for (int n = 0; args[0] == 1 && n < 100000; n++) {     /* interrupted: resume with the session in x6 */
++		IODelay(1);
+ 		uint64_t session = args[6];
+ 		uint64_t again[8] = { 1, arginfo, a, b, c, 0, session, 0 };
+ 		memcpy(args, again, sizeof(args));
++		__asm__ volatile ("mrs %0, daif; msr daifset, #2; isb" : "=r"(daif));
+ 		smc(args);
++		__asm__ volatile ("msr daif, %0; isb" :: "r"(daif));
+ 	}
+ 	if (res1 != NULL) {
+ 		*res1 = args[1];
+@@ -573,11 +581,12 @@ zap_load(void)
  	struct kbuf meta = {};
  	bool ok = false;
  
@@ -37,23 +70,25 @@ index 16da336..854315c 100644
  	{
  		const uint8_t *m = (const uint8_t *)mdt;
  		uint32_t phoff = *(const uint32_t *)(m + 28), phnum = *(const uint16_t *)(m + 44);
-@@ -605,9 +607,14 @@ zap_load(void)
- 		}
- 		IOLog("TopazGPU: zap: metadata at %#llx\n", meta.pa);
+@@ -607,7 +616,16 @@ zap_load(void)
  		memcpy(meta.va, mdt, mdt_size);
-+		IOLog("TopazGPU: zap: memcpy done\n");
  		sweet_dcache_clean((vm_offset_t)meta.va, (unsigned)mdt_size);
-+		IOLog("TopazGPU: zap: cache clean done\n");
  		__asm__ volatile ("dsb sy" ::: "memory");
 -		scm(SCM_FN(SCM_SVC_PIL, PIL_SHUTDOWN), 1, GPU_PAS_ID, 0, 0, &res);
-+		IOLog("TopazGPU: zap: calling PIL_SHUTDOWN\n");
-+		st = scm(SCM_FN(SCM_SVC_PIL, PIL_SHUTDOWN), 1, GPU_PAS_ID, 0, 0, &res);
-+		IOLog("TopazGPU: zap: PIL_SHUTDOWN %llx/%llx\n", st, res);
-+		IOLog("TopazGPU: zap: calling PIL_INIT_IMAGE\n");
++		uint32_t shut = 0;
++		PE_parse_boot_argn("gpu_pil_shutdown", &shut, sizeof(shut));
++		if (shut) {
++			IOLog("TopazGPU: zap: calling PIL_SHUTDOWN\n");
++			st = scm(SCM_FN(SCM_SVC_PIL, PIL_SHUTDOWN), 1, GPU_PAS_ID, 0, 0, &res);
++			IOLog("TopazGPU: zap: PIL_SHUTDOWN %llx/%llx\n", st, res);
++		} else {
++			IOLog("TopazGPU: zap: PIL_SHUTDOWN skipped\n");
++		}
++		IOLog("TopazGPU: zap: calling PIL_INIT_IMAGE (pa %#llx)\n", meta.pa);
  		st = scm(SCM_FN(SCM_SVC_PIL, PIL_INIT_IMAGE), 2 | (SCM_ARG_RW << 6), GPU_PAS_ID, meta.pa, 0, &res);
  		if (st != 0 || res != 0) {
  			IOLog("TopazGPU: zap init_image: %llx/%llx\n", st, res);
-@@ -637,6 +644,8 @@ zap_load(void)
+@@ -637,6 +655,8 @@ zap_load(void)
  	}
  out:
  	OSSafeReleaseNULL(meta.md);
@@ -62,7 +97,7 @@ index 16da336..854315c 100644
  	return ok;
  }
  
-@@ -956,16 +965,21 @@ cp_start(void)
+@@ -956,16 +976,21 @@ cp_start(void)
  	void *fw = NULL;
  	size_t fw_size = 0;
  
