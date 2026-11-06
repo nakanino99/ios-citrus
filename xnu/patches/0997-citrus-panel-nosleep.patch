@@ -1,0 +1,48 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1d3ee17..ee30973 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -362,6 +362,7 @@ AppleCLCD::start(IOService *provider)
+ 	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
+ 	fBlLock = IOLockAlloc();
+ 	fBlLevel = 0x133;                       /* panel init level (stock DT) */
++	(void)PE_parse_boot_argn("sweetbl_init", &fBlLevel, sizeof(fBlLevel));
+ 	fBlSent = ~0u;
+ 	fBlCall = thread_call_allocate(&AppleCLCD::blWork, this);
+ 	if (fDsi != NULL) {
+@@ -1044,7 +1045,13 @@ AppleCLCD::dsiSend(const uint8_t hdr[4], const uint8_t *payload, uint32_t len)
+ void
+ AppleCLCD::setPanelOn(bool on)
+ {
+-	uint8_t first[4] = { (uint8_t)(on ? 0x11 : 0x28), 0, 0x05, 0x80 };
++	/* citrus FT8719: no deep sleep unless sweetdsi_sleep=1 (0x28/0x29 only) */
++	static int sl = -1;
++	if (sl < 0) {
++		sl = 0;
++		(void)PE_parse_boot_argn("sweetdsi_sleep", &sl, sizeof(sl));
++	}
++	uint8_t first[4] = { (uint8_t)(on ? (sl ? 0x11 : 0x29) : 0x28), 0, 0x05, 0x80 };
+ 	uint8_t second[4] = { (uint8_t)(on ? 0x29 : 0x10), 0, 0x05, 0x80 };
+ 	bool done = true;
+ 	if (!on) {
+@@ -1053,12 +1060,14 @@ AppleCLCD::setPanelOn(bool on)
+ 	IOLockLock(fBlLock);
+ 	done &= dsiSend(first, NULL, 0);
+ 	IOLockUnlock(fBlLock);
+-	IOSleep(on ? 120 : 20);
+-	IOLockLock(fBlLock);
+-	done &= dsiSend(second, NULL, 0);
+-	IOLockUnlock(fBlLock);
+-	if (!on) {
+-		IOSleep(120);
++	IOSleep(on ? (sl ? 120 : 20) : 20);
++	if (sl) {
++		IOLockLock(fBlLock);
++		done &= dsiSend(second, NULL, 0);
++		IOLockUnlock(fBlLock);
++		if (!on) {
++			IOSleep(120);
++		}
+ 	}
+ 	IOLog("SWEET FB: panel %s: %s\n", on ? "sleep out, display on" : "display off, sleep in",
+ 	    done ? "done" : "NO DONE");

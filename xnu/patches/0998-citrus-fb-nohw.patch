@@ -7,14 +7,14 @@ index 1d3ee17..f332091 100644
  extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
  
 +static bool
-+sweet_fb_hw(void)
++sweet_fb_hw(uint32_t bit)
 +{
-+	static int on = -1;
-+	if (on < 0) {
++	static int m = -1;
++	if (m < 0) {
 +		uint32_t v = 0;
-+		on = (PE_parse_boot_argn("sweetfb_hw", &v, sizeof(v)) && v != 0) ? 1 : 0;
++		m = PE_parse_boot_argn("sweetfb_hw", &v, sizeof(v)) ? (int)v : 0;
 +	}
-+	return on != 0;
++	return (m & (int)bit) != 0;
 +}
 +
  #if defined(SWEET)
@@ -26,12 +26,12 @@ index 1d3ee17..f332091 100644
  	}
 -	fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
 -	fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
-+	fVig0 = (volatile uint32_t *)(sweet_fb_hw() ? ml_io_map(0x05e05000, 0x1000) : 0);
-+	fCtl0 = (volatile uint32_t *)(sweet_fb_hw() ? ml_io_map(0x05e02000, 0x1000) : 0);
++	fVig0 = (volatile uint32_t *)(sweet_fb_hw(1) ? ml_io_map(0x05e05000, 0x1000) : 0);
++	fCtl0 = (volatile uint32_t *)(sweet_fb_hw(1) ? ml_io_map(0x05e02000, 0x1000) : 0);
  	topaz_adreno_init();
  	setProperty("RedwoodWaitsForGPU", true);         /* present() waits for the GPU (eagl.c reads it) */
 -	fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
-+	fDsi = (volatile uint8_t *)(sweet_fb_hw() ? ml_io_map(0x05e94000, 0x1000) : 0);
++	fDsi = (volatile uint8_t *)(sweet_fb_hw(4) ? ml_io_map(0x05e94000, 0x1000) : 0);
  	fDsiBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
  	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
  	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
@@ -40,7 +40,7 @@ index 1d3ee17..f332091 100644
  	OSSafeReleaseNULL(accel);
  	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
 -	fIntf1 = (volatile uint32_t *)ml_io_map(0x05e6b000, 0x1000);
-+	fIntf1 = (volatile uint32_t *)(sweet_fb_hw() ? ml_io_map(0x05e6b000, 0x1000) : 0);
++	fIntf1 = (volatile uint32_t *)(sweet_fb_hw(2) ? ml_io_map(0x05e6b000, 0x1000) : 0);
  	if (fIntf1 != NULL) {
  		volatile uint32_t *r = fIntf1 + 0x800 / 4;
  		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
