@@ -1,0 +1,74 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -7413,7 +7413,13 @@
+ 			}
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 			/* SWEET runs every iOS binary this way: one short line per exec. */
+-			printf("exec %s\n", p->p_name);
++			{
++				extern int sweet_logv(void);
++
++				if (sweet_logv() & 1) {
++					printf("exec %s\n", p->p_name);
++				}
++			}
+ 			/* topaz: does the window server get our library (GPU's OpenGL ES)? */
+ 			if (strcmp(p->p_name, "backboardd") == 0 && imgp->ip_endargv != NULL && imgp->ip_endenvv != NULL) {
+ 				const char *e = imgp->ip_endargv, *end = imgp->ip_endenvv;
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1886,11 +1886,12 @@
+ 
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 		if (p == current_proc()) {
++			extern int sweet_logv(void);
+ 			extern void sweet_crash_log(const char *, int, int, uint64_t, uint64_t);
+ 			sweet_crash_log(p->p_comm, proc_getpid(p), WTERMSIG(rv),
+ 			    ((uint64_t)ut->uu_exception << 32) | (uint32_t)ut->uu_code, ut->uu_subcode);
+ 			/* abort_with_payload messages (_objc_fatal, os_crash_fmt, ...) */
+-			if (PROC_HAS_EXITREASON(p)) {
++			if (PROC_HAS_EXITREASON(p) && (sweet_logv() & 2)) {
+ 				char *desc = exit_reason_get_string_desc(p->p_exit_reason);
+ 				printf("CRASH %s reason ns %u code 0x%llx: %s\n", p->p_comm,
+ 				    p->p_exit_reason->osr_namespace, p->p_exit_reason->osr_code,
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -823,6 +823,27 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ #include <vm/vm_shared_region.h>
+ #include <arm/thread.h>
++#include <pexpert/pexpert.h>
++
++/*
++ * sweetlog boot-arg: bit0 = "exec <name>" lines, bit1 = CRASH reports.
++ * Default 0 = quiet console.
++ */
++int sweet_logv(void);
++
++int
++sweet_logv(void)
++{
++	static int v = -1;
++
++	if (v < 0) {
++		int a = 0;
++
++		(void)PE_parse_boot_argn("sweetlog", &a, sizeof(a));
++		v = a;
++	}
++	return v;
++}
+ 
+ /*
+  * SWEET crash report on the console. The phone has no way to get crash
+@@ -837,6 +858,9 @@
+ void
+ sweet_crash_log(const char *name, int pid, int sig, uint64_t code, uint64_t subcode)
+ {
++	if (!(sweet_logv() & 2)) {
++		return;
++	}
+ 	thread_t thread = current_thread();
+ 	task_t task = current_task();
+ 	arm_saved_state_t *ss = find_user_regs(thread);
+
