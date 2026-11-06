@@ -1,0 +1,512 @@
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -614,6 +614,489 @@
+ 	return true;
+ }
+ 
++/*
++ * citrus (SM6115): FocalTech FT8719 TDDI touch on SPI, driven by GPIO
++ * bit-bang (no GENI, no GCC clock). Pins and TLMM tiles as proven by the
++ * shim stage 1 (west tile for 6/7/71/80/93, the reset on the south tile),
++ * protocol from Ft8719SpiTouchDxe.c: ROM boot, PRAM download with ECC check,
++ * START_APP, then touch frames through command 0x01.
++ * Boot-arg sweettouch=2. Firmware: /usr/share/firmware/topaz/ft8719_fw.bin,
++ * read once from the root volume (no firmware: logged, touch stays off).
++ */
++#define FT_TLMM_W       0x00500000u
++#define FT_TLMM_S       0x00900000u
++#define FT_P_MISO       6u
++#define FT_P_MOSI       7u
++#define FT_P_SCLK       71u
++#define FT_P_CS         80u
++#define FT_P_IRQ        93u
++#define FT_P_RST        103u
++#define FT_FW_PATH      "/usr/share/firmware/topaz/ft8719_fw.bin"
++#define FT_FW_INFO      0x100u
++#define FT_PKT_BUF      (32u * 1024u + 64u)
++
++extern int topaz_fw_read(const char *path, void **data, size_t *size);
++
++static int touch_mode;
++static vm_offset_t ft_west, ft_rst;
++static bool ft_run;                     /* application running, not ROM boot */
++static uint8_t ft_tx[FT_PKT_BUF], ft_rx[FT_PKT_BUF], ft_cmd[FT_PKT_BUF];
++static const uint8_t *ft_fw;
++static size_t ft_fw_size;
++
++static vm_offset_t
++ft_pin(unsigned pin)
++{
++	return pin == FT_P_RST ? ft_rst : ft_west + (vm_offset_t)pin * 0x1000u;
++}
++
++static void
++ft_gp_cfg(unsigned pin, unsigned pull, unsigned drive, bool out, bool high)
++{
++	vm_offset_t b = ft_pin(pin);
++	uint32_t c;
++	if (out) {
++		touch_wr(b, 4, (touch_rd(b, 4) & ~2u) | (high ? 2u : 0u));
++	}
++	c = touch_rd(b, 0) & ~0x3ffu;           /* mux 0 = GPIO */
++	c |= pull | (drive << 6) | (out ? 0x200u : 0u);
++	touch_wr(b, 0, c);
++}
++
++static void
++ft_gp_set(unsigned pin, int v)
++{
++	vm_offset_t b = ft_pin(pin);
++	touch_wr(b, 4, (touch_rd(b, 4) & ~2u) | (v ? 2u : 0u));
++}
++
++static int
++ft_gp_get(unsigned pin)
++{
++	return (int)(touch_rd(ft_pin(pin), 4) & 1u);
++}
++
++static uint8_t
++ft_spi_byte(uint8_t t)
++{
++	uint8_t r = 0;
++	for (int bit = 7; bit >= 0; bit--) {
++		ft_gp_set(FT_P_MOSI, (t >> bit) & 1);
++		ft_gp_set(FT_P_SCLK, 1);
++		r = (uint8_t)((r << 1) | ft_gp_get(FT_P_MISO));
++		ft_gp_set(FT_P_SCLK, 0);
++	}
++	return r;
++}
++
++static void
++ft_xfer(const uint8_t *tx, uint8_t *rx, unsigned len)
++{
++	ft_gp_set(FT_P_CS, 0);
++	delay(5);
++	rx[0] = ft_spi_byte(tx[0]);
++	delay(30);
++	for (unsigned i = 1; i < len; i++) {
++		rx[i] = ft_spi_byte(tx[i]);
++	}
++	delay(5);
++	ft_gp_set(FT_P_CS, 1);
++	delay(150);
++}
++
++static uint16_t
++ft_crc(const uint8_t *d, unsigned n)
++{
++	uint16_t c = 0xffff;
++	for (unsigned i = 0; i < n; i++) {
++		c = (uint16_t)(c ^ d[i]);
++		for (int j = 0; j < 8; j++) {
++			c = (c & 1) ? (uint16_t)((c >> 1) ^ 0x8408) : (uint16_t)(c >> 1);
++		}
++	}
++	return c;
++}
++
++/* ROM boot: idle = status & 0x81 == 0, application: == 1 */
++static int
++ft_idle(void)
++{
++	uint8_t want = ft_run ? 1 : 0;
++	for (int i = 0; i < 100; i++) {
++		uint8_t a[2] = { 0x05, 0 }, b[2] = { 0, 0 };
++		delay(150);
++		ft_xfer(a, b, 2);
++		if ((b[1] & 0x81) == want) {
++			return b[1];
++		}
++	}
++	return -1;
++}
++
++static int
++ft_cmdpkg(uint8_t ctrl, const uint8_t *cmd, unsigned n)
++{
++	uint8_t a[16], b[16];
++	if (!n || n > 12) {
++		return -1;
++	}
++	memset(a, 0, sizeof(a));
++	memset(b, 0, sizeof(b));
++	a[0] = 0xc0;
++	a[1] = (uint8_t)(ctrl | (n & 0xfu));
++	for (unsigned i = 0; i < n; i++) {
++		a[2 + i] = cmd[i];
++	}
++	ft_xfer(a, b, 2 + n);
++	return 0;
++}
++
++static int
++ft_bootwrite(const uint8_t *cmd, unsigned cl, const uint8_t *data, unsigned dl)
++{
++	uint8_t tmp[16];
++	if (!cl || cl > 12 || dl + 1u > FT_PKT_BUF || ft_idle() < 0) {
++		return -1;
++	}
++	memcpy(tmp, cmd, cl);
++	if (ft_run && data && dl) {
++		tmp[cl++] = (uint8_t)(dl >> 8);
++		tmp[cl++] = (uint8_t)dl;
++	}
++	if (ft_cmdpkg(0x00, tmp, cl) < 0) {
++		return -1;
++	}
++	if (data && dl) {
++		if (ft_idle() < 0) {
++			return -1;
++		}
++		ft_tx[0] = 0x3f;
++		memcpy(ft_tx + 1, data, dl);
++		ft_xfer(ft_tx, ft_rx, 1 + dl);
++	}
++	return 0;
++}
++
++static int
++ft_write(const uint8_t *buf, unsigned len)
++{
++	unsigned cl = 1;
++	if (len == 1) {
++		return ft_bootwrite(buf, 1, NULL, 0);
++	}
++	if (!ft_run) {
++		if (buf[0] == 0xae || buf[0] == 0x85 || buf[0] == 0xf2) {
++			cl = 6;
++		} else if (buf[0] == 0xcc) {
++			cl = 7;
++		}
++	}
++	return ft_bootwrite(buf, cl, buf + cl, len - cl);
++}
++
++/* Read with CRC. No command: just clock the data package out. */
++static int
++ft_read(const uint8_t *cmd, unsigned cl, uint8_t *out, unsigned dl)
++{
++	if (cmd && cl) {
++		uint8_t tmp[16];
++		if (cl > 12 || ft_idle() < 0) {
++			return -1;
++		}
++		memcpy(tmp, cmd, cl);
++		if (ft_run) {
++			tmp[cl++] = (uint8_t)(dl >> 8);
++			tmp[cl++] = (uint8_t)dl;
++		}
++		if (ft_cmdpkg(0xa0, tmp, cl) < 0 || ft_idle() < 0) {
++			return -1;
++		}
++	}
++	if (out && dl) {
++		unsigned tl = 1 + dl + 2;
++		if (tl > FT_PKT_BUF) {
++			return -1;
++		}
++		memset(ft_tx, 0, tl);
++		memset(ft_rx, 0, tl);
++		ft_tx[0] = 0x3f;
++		ft_xfer(ft_tx, ft_rx, tl);
++		memcpy(out, ft_rx + 1, dl);
++		if (ft_crc(ft_rx + 1, dl) != (uint16_t)((ft_rx[tl - 1] << 8) | ft_rx[tl - 2])) {
++			return -2;
++		}
++	}
++	return 0;
++}
++
++static bool
++ft_fastdl(void)
++{
++	uint8_t reg = 0xdb, v = 0, c[6] = { 0xf2, 0x00, 0x78, 0x0a, 0x00, 0x02 }, f[2] = { 0, 0 };
++	if (ft_read(&reg, 1, &v, 1) < 0 || ft_read(c, 6, f, 2) < 0) {
++		return false;
++	}
++	return v >= 0x18 && f[0] == 0x55;
++}
++
++static int
++ft_pram(const uint8_t *buf, unsigned len, bool fd)
++{
++	unsigned ps = fd ? (32u * 1024u - 16u) : (4u * 1024u - 4u);
++	unsigned np = (len + ps - 1) / ps;
++	for (unsigned i = 0; i < np; i++) {
++		unsigned off = i * ps;
++		unsigned pl = (i == np - 1 && (len % ps)) ? (len % ps) : ps;
++		ft_cmd[0] = 0xae;
++		ft_cmd[1] = (uint8_t)(off >> 16);
++		ft_cmd[2] = (uint8_t)(off >> 8);
++		ft_cmd[3] = (uint8_t)off;
++		ft_cmd[4] = (uint8_t)(pl >> 8);
++		ft_cmd[5] = (uint8_t)pl;
++		memcpy(ft_cmd + 6, buf + off, pl);
++		if (ft_write(ft_cmd, 6 + pl) < 0) {
++			return -(int)(i + 1);
++		}
++		if (!fd) {
++			touch_wait(3);
++		}
++	}
++	return 0;
++}
++
++static uint16_t
++ft_ecc_host(const uint8_t *d, unsigned len)
++{
++	uint16_t e = 0, coef = (uint16_t)((1u << 15) + (1u << 10) + (1u << 3));
++	for (unsigned i = 0; i + 1 < len; i += 2) {
++		e = (uint16_t)(e ^ ((d[i] << 8) | d[i + 1]));
++		for (int j = 0; j < 16; j++) {
++			e = (e & 1) ? (uint16_t)((e >> 1) ^ coef) : (uint16_t)(e >> 1);
++		}
++	}
++	return e;
++}
++
++static int
++ft_ecc_tp(unsigned len, uint16_t *ecc)
++{
++	uint8_t c[7] = { 0xcc, 0, 0, 0, (uint8_t)(len >> 16), (uint8_t)(len >> 8), (uint8_t)len };
++	uint8_t v[2] = { 0, 0 };
++	if (ft_write(c, 7) < 0) {
++		return -1;
++	}
++	touch_wait(2);
++	c[0] = 0xce;
++	for (int i = 0; i < 100; i++) {
++		if (ft_read(c, 1, v, 1) < 0) {
++			return -1;
++		}
++		if (v[0] == 0) {
++			break;
++		}
++		touch_wait(1);
++	}
++	c[0] = 0xcd;
++	if (ft_read(c, 1, v, 2) < 0) {
++		return -1;
++	}
++	*ecc = (uint16_t)((v[0] << 8) | v[1]);
++	return 0;
++}
++
++static void
++ft_pins(void)
++{
++	ft_gp_cfg(FT_P_CS, 3, 3, true, true);
++	ft_gp_cfg(FT_P_RST, 3, 3, true, true);
++	ft_gp_cfg(FT_P_IRQ, 3, 0, false, false);
++	ft_gp_cfg(FT_P_SCLK, 0, 3, true, false);
++	ft_gp_cfg(FT_P_MOSI, 0, 3, true, false);
++	ft_gp_cfg(FT_P_MISO, 3, 0, false, false);
++	ft_gp_set(FT_P_CS, 1);
++	ft_gp_set(FT_P_RST, 1);
++	ft_gp_set(FT_P_SCLK, 0);
++}
++
++static bool
++ft_load_fw(void)
++{
++	void *data = NULL;
++	size_t size = 0;
++	for (int i = 0; i < 20; i++) {
++		int r = topaz_fw_read(FT_FW_PATH, &data, &size);
++		if (!r && data && size > FT_FW_INFO + 2u) {
++			ft_fw = (const uint8_t *)data;
++			ft_fw_size = size;
++			return true;
++		}
++		if (i == 0) {
++			printf("SWEET TOUCH: ft8719 firmware %s not readable yet (%d), retrying\n", FT_FW_PATH, r);
++		}
++		touch_wait(3000);
++	}
++	return false;
++}
++
++/* Reset, ROM boot id, PRAM download, ECC check, start the application. */
++static int
++ft_download(void)
++{
++	uint8_t c, id[2] = { 0, 0 };
++	bool ok = false, fd;
++	unsigned codelen = ((unsigned)ft_fw[FT_FW_INFO] << 8) | ft_fw[FT_FW_INFO + 1];
++	uint16_t eh, et = 0;
++	int r;
++	if (codelen == 0 || codelen > ft_fw_size) {
++		printf("SWEET TOUCH: ft8719 bad firmware header (len %u of %lu)\n", codelen, (unsigned long)ft_fw_size);
++		return -4;
++	}
++	ft_run = false;
++	for (int loop = 0; loop < 5 && !ok; loop++) {
++		ft_gp_set(FT_P_RST, 0);
++		touch_wait(10);
++		ft_gp_set(FT_P_RST, 1);
++		touch_wait(8);
++		c = 0x55;
++		(void)ft_write(&c, 1);
++		touch_wait(8);
++		c = 0x90;
++		if (ft_read(&c, 1, id, 2) >= 0 && id[0] == 0x87 && id[1] == 0x19) {
++			ok = true;
++		}
++	}
++	printf("SWEET TOUCH: ft8719 boot=%d id=%02x%02x pram=%u\n", ok ? 1 : 0, id[0], id[1], codelen);
++	if (!ok) {
++		return -1;
++	}
++	fd = ft_fastdl();
++	r = ft_pram(ft_fw, codelen, fd);
++	printf("SWEET TOUCH: ft8719 fast=%d pram write=%d\n", fd ? 1 : 0, r);
++	if (r < 0) {
++		return -2;
++	}
++	eh = ft_ecc_host(ft_fw, codelen);
++	r = ft_ecc_tp(codelen, &et);
++	printf("SWEET TOUCH: ft8719 ecc host=%04x tp=%04x r=%d\n", eh, et, r);
++	if (r < 0 || eh != et) {
++		return -3;
++	}
++	c = 0x08;                               /* START_APP */
++	(void)ft_write(&c, 1);
++	touch_wait(150);
++	ft_run = true;
++	{
++		uint8_t a3 = 0, a6 = 0, ra = 0xa3, rb = 0xa6;
++		int e1 = ft_read(&ra, 1, &a3, 1), e2 = ft_read(&rb, 1, &a6, 1);
++		printf("SWEET TOUCH: ft8719 app chip=%02x fw=%02x e=%d/%d\n", a3, a6, e1, e2);
++	}
++	return 0;
++}
++
++/* One frame: 0x01 command, 14 bytes (2 points); the full 62 when more. */
++static int
++ft_frame(void)
++{
++	uint8_t buf[64], c = 0x01;
++	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
++	uint32_t mask = 0;
++	unsigned n;
++	static unsigned logged;
++	memset(buf, 0, sizeof(buf));
++	if (ft_read(&c, 1, buf + 1, 14) < 0 || (buf[1] & 0xf0) != 0x90) {
++		if (ft_read(NULL, 0, buf + 1, 62) < 0 || (buf[1] & 0xf0) != 0x90) {
++			return EIO;
++		}
++	}
++	st.s_frames++;
++	n = buf[2] & 0x0fu;
++	if (n > 2 && n <= TOUCH_MAX && ft_read(&c, 1, buf + 1, 62) < 0) {
++		return EIO;
++	}
++	if (n == 0 || n > TOUCH_MAX) {
++		touch_report(0, x, y);
++		return 0;
++	}
++	if (n > st.s_maxn) {
++		st.s_maxn = n;
++	}
++	for (unsigned i = 0; i < n; i++) {
++		const uint8_t *p = buf + 3u + 6u * i;
++		unsigned event = p[0] >> 6, id = p[2] >> 4;
++		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
++		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
++		if (id >= TOUCH_MAX) {
++			break;
++		}
++		if (event == 1u || event == 3u) {
++			continue;                       /* UP record / no event */
++		}
++		if (logged < 24) {
++			logged++;
++			printf("SWEET TOUCH: ft8719 n=%u id=%u ev=%u raw=%u,%u irq=%d\n",
++				n, id, event, px, py, ft_gp_get(FT_P_IRQ));
++		}
++		/* The panel is 1080x2340; sweet_hid_touch() normalizes y over 2400. */
++		py = py * 40u / 39u;
++		x[id] = (int)(px > 1079u ? 1079u : px);
++		y[id] = (int)(py > 2399u ? 2399u : py);
++		mask |= 1u << id;
++	}
++	touch_report(mask, x, y);
++	return 0;
++}
++
++static void
++ft8719_run(void)
++{
++	int irq_hint = 0, r;
++	unsigned errors = 0, ticks = 0;
++	(void)PE_parse_boot_argn("sweettouchirq", &irq_hint, sizeof(irq_hint));
++	printf("SWEET TOUCH: FT8719 SPI mode (sweettouch=2)\n");
++	st.stage = "ft8719 map";
++	ft_west = ml_io_map(FT_TLMM_W, 0x5e000);
++	ft_rst = ml_io_map(FT_TLMM_S + FT_P_RST * 0x1000u, 0x1000);
++	if (!ft_west || !ft_rst) {
++		printf("SWEET TOUCH: ft8719 MMIO mapping failed\n");
++		return;
++	}
++	st.stage = "ft8719 firmware";
++	if (!ft_load_fw()) {
++		printf("SWEET TOUCH: ft8719 firmware missing; touch stays off\n");
++		return;
++	}
++	st.stage = "ft8719 download";
++	ft_pins();
++	r = ft_download();
++	printf("SWEET TOUCH: ft8719 download=%d\n", r);
++	if (r) {
++		return;
++	}
++	st.stage = "ft8719 polling";
++	printf("SWEET TOUCH: ft8719 running, 1080x2340, poll=10ms irq-hint=%d\n", irq_hint);
++	for (;;) {
++		if (!irq_hint || st.active || !ft_gp_get(FT_P_IRQ) || (++ticks % 10u) == 0) {
++			int err = ft_frame();
++			if (err) {
++				st.s_errs++;
++				if ((errors++ % 100u) == 0) {
++					printf("SWEET TOUCH: ft8719 report err=%d irq=%d\n", err, ft_gp_get(FT_P_IRQ));
++				}
++				if (errors == 10) {
++					touch_report(0, st.x, st.y);    /* release after persistent bad reads */
++				}
++				if (errors == 30 && ft_download() == 0) {
++					errors = 0;             /* chip fell back to ROM boot: reloaded */
++				}
++			} else {
++				errors = 0;
++			}
++		}
++		/* a failing read spins ~35 ms in ft_idle(): back off, one CPU only */
++		touch_wait(errors >= 10 ? 500u : 10u);
++	}
++}
++
+ static void
+ touch_thread(void *arg, wait_result_t result)
+ {
+@@ -627,6 +1110,11 @@
+ 	(void)PE_parse_boot_argn("sweettouchdelay", &delay_s, sizeof(delay_s));
+ 	printf("SWEET TOUCH: starting in %u s\n", delay_s);
+ 	touch_wait(delay_s * 1000u);
++	if (touch_mode == 2) {
++		/* citrus: FT8719 on SPI (GPIO bit-bang); the I2C paths below are topaz-only */
++		ft8719_run();
++		goto out;
++	}
+ 	st.stage = "map";
+ 	printf("SWEET TOUCH: mapping GCC/TLMM/SE2\n");
+ 	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x80000);
+@@ -750,6 +1238,7 @@
+ 	}
+ 	st.started = true;
+ 	(void)PE_parse_boot_argn("sweettouch", &enabled, sizeof(enabled));
++	touch_mode = enabled;                   /* 2 = citrus FT8719 SPI */
+ 	st.irq_hint = 1; /* topaz: read on IRQ GPIO80 low, while touching, else every 100 ms */
+ 	(void)PE_parse_boot_argn("sweettouchirq", &st.irq_hint, sizeof(st.irq_hint));
+ 	(void)PE_parse_boot_argn("sweettouchdiag", &st.diag, sizeof(st.diag));
