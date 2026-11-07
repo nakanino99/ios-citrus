@@ -1,0 +1,14 @@
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -119,6 +119,11 @@
+ 				sweet_hid_key(k, state[k]);
+ 			}
+ 		}
++		static unsigned hb;
++		if ((++hb % 250u) == 0) {
++			printf("SWEET KEYS: hb pon=%#x/%d gpio=%#x/%d st=%#x now=%d%d%d\n",
++			    pon, pok, gpio, gok, keys_last_status, now[0], now[1], now[2]);
++		}
+ 		keys_wait();
+ 	}
+ }
