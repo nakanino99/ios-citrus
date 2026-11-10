@@ -1,0 +1,44 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 74f982e..ca9c31f 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -110,6 +110,7 @@ static IOLock       *sweet_surface_lock;
+ static SweetSurface *sweet_surface_table[SWEET_SURFACE_MAX_ID];
+ static uint32_t      sweet_surface_users[SWEET_SURFACE_MAX_ID];
+ static uint32_t      sweet_surface_next_id = 1;
++static uint32_t      sweet_surface_nrel, sweet_surface_nfree;    /* diagnostics: releases from userland, surfaces freed */
+ static uint32_t      sweet_surface_creates_logged;
+ static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
+ #define SWEET_SURFACE_WIRED_MAX         (1536ull << 20)
+@@ -285,6 +286,7 @@ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
+ void
+ SweetSurface::free()
+ {
++	OSIncrementAtomic((volatile SInt32 *)&sweet_surface_nfree);
+ 	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
+ 		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&sweet_surface_wired);
+ 	}
+@@ -1118,10 +1120,11 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 		char name[32];
+ 		proc_selfname(name, sizeof(name));
+ 		sweet_surface_creates_logged++;
+-		IOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x wired %lluMB nextid %u\n",
++		IOLog("SWEET SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x wired %lluMB nextid %u rel %u free %u\n",
+ 		    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,
+ 		    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret,
+-		    (unsigned long long)(sweet_surface_wired >> 20), sweet_surface_next_id);
++		    (unsigned long long)(sweet_surface_wired >> 20), sweet_surface_next_id,
++		    sweet_surface_nrel, sweet_surface_nfree);
+ 	}
+ 	props->release();
+ 	if (ret != kIOReturnSuccess) {
+@@ -1664,6 +1667,9 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
+ 	if (ref == NULL) {
+ 		ref = findRef((uint32_t)(uintptr_t)id, &index);
+ 	}
++	if (ref != NULL) {
++		OSIncrementAtomic((volatile SInt32 *)&sweet_surface_nrel);
++	}
+ 	if (ref != NULL && --ref->count == 0) {
+ 		/*
+ 		 * The pixels are unmapped now; the state page (read-only) stays mapped a while.
