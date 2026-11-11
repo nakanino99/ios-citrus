@@ -9,12 +9,12 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +extern "C" void topaz_adreno_init(void);
 +extern "C" void sweet_touch_init(void);           /* iokit/Kernel/arm/TopazAdreno.cpp (boot-arg gpu=1) */
  bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* RedwoodGPU.cpp */
- 
+
  /*
 @@ -95,6 +96,17 @@ static void sweet_bl_log(const char *who, OSDictionary *d);
  extern "C" void sweet_dcache_clean(vm_offset_t addr, unsigned length);  /* osfmk/arm/caches.c */
  extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
- 
+
 +static bool
 +sweet_fb_hw(uint32_t bit)
 +{
@@ -54,10 +54,17 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  	if (fIntf1 != NULL) {
  		volatile uint32_t *r = fIntf1 + 0x800 / 4;
  		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
-@@ -417,6 +430,14 @@ AppleCLCD::start(IOService *provider)
+@@ -417,13 +430,15 @@ AppleCLCD::start(IOService *provider)
  		IOLog("SWEET FB: MDP VIG0 src %#x stride %u (boot), direct scanout ready\n",
  		    fBootSrc, fBootStride);
  		sweet_scanout_set_geometry(fWidth, fHeight, fLogicalW, fLogicalH);
+-		vm_size_t fsz = (vm_size_t)fRowBytes * fHeight;
+-		for (int i = 0; i < 2; i++) {
+-			fFlip[i] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+-			    kIODirectionInOut | kIOMemoryPhysicallyContiguous, fsz, 0x00000000fffff000ull);
+-			fFlipPhys[i] = fFlip[i] ? fFlip[i]->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
+-		}
+-		fFadeOrig = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, fsz, page_size);
 +	}
 +	vm_size_t fsz = (vm_size_t)fRowBytes * fHeight;
 +	for (int i = 0; i < 2; i++) {
@@ -67,26 +74,46 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +	}
 +	fFadeOrig = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, fsz, page_size);
 +	if (fVig0 != NULL && fCtl0 != NULL) {
- 		vm_size_t fsz = (vm_size_t)fRowBytes * fHeight;
--		for (int i = 0; i < 2; i++) {
--			fFlip[i] = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
--			    kIODirectionInOut | kIOMemoryPhysicallyContiguous, fsz, 0x00000000fffff000ull);
--			fFlipPhys[i] = fFlip[i] ? fFlip[i]->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
--		}
--		fFadeOrig = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, fsz, page_size);
  		fCons = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
  		    kIODirectionInOut | kIOMemoryPhysicallyContiguous, fsz, 0x00000000fffff000ull);
-@@ -853,7 +867,8 @@ AppleCLCD::directEligible(const uint8_t *rec, SweetSurface **held)
+ 		if (fFlip[0] == NULL || fFlip[1] == NULL || fFadeOrig == NULL) {
+@@ -588,17 +602,21 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	memcpy(retire, fb->fRetireHold, sizeof(retire));
+ 	bzero(fb->fRetireHold, sizeof(fb->fRetireHold));
+ 	IOLockUnlock(fb->fLock);
++	sender->setTimeoutUS(fb->fVLock ? fb->vsyncNext() : SWEET_FB_VSYNC_US);
+ 	sweet_hold_set(retire, false);
+ 	if (fb->fConsShown && sweet_console_copy_dirty(fb->backBuffer())) {
+ 		fb->flipBack();
+ 	}
+ 	if (rec != NULL) {
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+-		IOLockLock(fb->fLock);
+-		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
+-		memcpy(fb->fShowHold, taken, sizeof(taken));
+-		IOLockUnlock(fb->fLock);
++		if (fb->fVig0 == NULL) {
++			sweet_hold_set(taken, false);
++		} else {
++			IOLockLock(fb->fLock);
++			memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
++			memcpy(fb->fShowHold, taken, sizeof(taken));
++			IOLockUnlock(fb->fLock);
++		}
+ 	}
+-	sender->setTimeoutUS(fb->fVLock ? fb->vsyncNext() : SWEET_FB_VSYNC_US);
+ }
+@@ -853,7 +871,7 @@ AppleCLCD::directEligible(const uint8_t *rec, SweetSurface **held)
  			layer = layer < 0 ? (int)i : -2;
  		}
  	}
 -	return layer >= 0 && held[layer] != NULL && held[layer]->gpuPool && !fPowerOff && !fConsShown;
-+	(void)held;
-+	return !fPowerOff && !fConsShown && (fCtl0 == NULL || (layer >= 0 && held[layer] != NULL && held[layer]->gpuPool));
++	return fCtl0 != NULL && layer >= 0 && held[layer] != NULL && held[layer]->gpuPool && !fPowerOff && !fConsShown;
  }
- 
+
  void
-@@ -904,7 +919,7 @@ AppleCLCD::showDirect(const uint8_t *rec, SweetSurface **heldIn)
+@@ -904,7 +922,7 @@ AppleCLCD::showDirect(const uint8_t *rec, SweetSurface **heldIn)
  		sweet_hold_set(dropped, false);
  		uint64_t waited = mach_absolute_time(), wns = 0;  /* (present waits for the GPU too) */
  		present(rec);
@@ -95,7 +122,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  			IODelay(100);                           /* until the MDP has latched it */
  		}
  		absolutetime_to_nanoseconds(mach_absolute_time() - waited, &wns);
-@@ -1220,8 +1235,12 @@ void
+@@ -1220,8 +1238,12 @@ void
  AppleCLCD::flipBack(void)
  {
  	uint32_t idx = fFlipIdx ^ 1;
@@ -109,8 +136,8 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +	}
  	fFlipIdx = idx;
  }
- 
-@@ -1344,8 +1363,13 @@ AppleCLCD::present(const uint8_t *rec)
+
+@@ -1344,8 +1366,13 @@ AppleCLCD::present(const uint8_t *rec)
  	 * flip, like the direct path. Composing into the scanned, uncached boot
  	 * framebuffer showed every multi-layer frame (dims, apps) drawn top-down.
  	 */
@@ -125,8 +152,8 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +	if (!useFlip && fVig0 != NULL && fScanPhys != fBootSrc) {
  		scanFrom(fBootSrc, fBootStride);
  	}
- 
-@@ -1425,14 +1449,20 @@ AppleCLCD::present(const uint8_t *rec)
+
+@@ -1425,15 +1452,21 @@ AppleCLCD::present(const uint8_t *rec)
  			src = 0;
  		}
  		if (src != 0 && bpe == 4) {
