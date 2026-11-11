@@ -1,0 +1,68 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 81ab9d0..edbf610 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -8,6 +8,7 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
+  * one vsync after the next frame replaced it on the panel.
+  */
+ static uint64_t sweet_fps_tick;         /* mach time of the last vsync tick (SWEET FPS) */
++static uint64_t sweet_tick_present_ns;  /* this second: time in present() on the vsync tick (SWEET FPS "present") */
+ 
+ /* boot-arg sweetfb_nohold=1 (a test): frames on the panel are not marked in use */
+ static bool
+@@ -36,6 +37,7 @@ sweet_fb_nohold(void)
+ 		return;
+ 	}
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++	bool armed = false;     /* boot-arg sweetfb_early=1: the next tick was armed before the copy */
+ 	uint8_t *rec = NULL;
+ 	SweetSurface *taken[4] = {};
+ 	if (flush) {
+@@ -57,14 +59,28 @@ sweet_fb_nohold(void)
+ 		fb->flipBack();
+ 	}
+ 	if (rec != NULL) {
++		static int early = -1;
++		if (early < 0) {
++			uint32_t v = 0;
++			early = PE_parse_boot_argn("sweetfb_early", &v, sizeof(v)) && v != 0;
++		}
++		if (early && !fb->fVLock) {
++			sender->setTimeoutUS(SWEET_FB_VSYNC_US);        /* counted from the start of the copy, not its end */
++			armed = true;
++		}
++		uint64_t t0 = mach_absolute_time(), dt = 0;
+ 		fb->present(rec);
++		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &dt);
++		sweet_tick_present_ns += dt;
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 		IOLockLock(fb->fLock);
+ 		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
+ 		memcpy(fb->fShowHold, taken, sizeof(taken));
+ 		IOLockUnlock(fb->fLock);
+ 	}
+-	sender->setTimeoutUS(fb->fVLock ? fb->vsyncNext() : SWEET_FB_VSYNC_US);
++	if (!armed) {
++		sender->setTimeoutUS(fb->fVLock ? fb->vsyncNext() : SWEET_FB_VSYNC_US);
++	}
+ }
+ 
+ /*
+@@ -129,13 +145,14 @@ sweet_fps_count(void)
+ 	gap_max = gap > gap_max ? gap : gap_max;
+ 	absolutetime_to_nanoseconds(now - window, &ns);
+ 	if (ns >= 1000000000ull) {
++		uint64_t present_us = frames ? (sweet_fps_wait_ns + sweet_tick_present_ns) / 1000 / frames : 0;
+ 		IOLog("SWEET FPS: %u frames in %llu ms, longest gap %llu ms, %u late; a frame: %llu us in present + latch, "
+ 		    "came %llu us after the tick\n", frames, ns / 1000000, gap_max / 1000000, late,
+-		    frames ? sweet_fps_wait_ns / 1000 / frames : 0, frames ? sweet_fps_after_ns / 1000 / frames : 0);
++		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0);
+ 		snprintf(sweet_fps_stat, sizeof(sweet_fps_stat), "%u %u %llu %llu %u %llu %llu", ++sweet_fps_seq, frames,
+ 		    ns / 1000000, gap_max / 1000000, late,
+-		    frames ? sweet_fps_wait_ns / 1000 / frames : 0, frames ? sweet_fps_after_ns / 1000 / frames : 0);
+-		sweet_fps_wait_ns = sweet_fps_after_ns = 0;
++		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0);
++		sweet_fps_wait_ns = sweet_fps_after_ns = sweet_tick_present_ns = 0;
+ 		window = now;
+ 		frames = late = 0;
+ 		gap_max = 0;
