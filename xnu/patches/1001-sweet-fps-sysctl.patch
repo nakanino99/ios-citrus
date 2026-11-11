@@ -1,0 +1,50 @@
+diff --git a/bsd/dev/sweet_sample.c b/bsd/dev/sweet_sample.c
+index b40eccd..a91d2f8 100644
+--- a/bsd/dev/sweet_sample.c
++++ b/bsd/dev/sweet_sample.c
+@@ -16,6 +16,7 @@
+ #include <sys/systm.h>
+ #include <sys/proc.h>
+ #include <sys/proc_internal.h>
++#include <sys/sysctl.h>
+ #include <kern/task.h>
+ #include <kern/thread.h>
+ #include <pexpert/pexpert.h>
+@@ -26,6 +27,14 @@ extern void sweet_sample_start(void);
+ 
+ static char sweet_sample_names[128];
+ 
++/*
++ * SWEET FPS (iokit/Kernel/arm/SweetFramebuffer.cpp): the last full second of frames as
++ * "seq frames ms gap_ms late present_us after_us", for specinfod (sysctl kern.sweet_fps).
++ */
++char sweet_fps_stat[128];
++SYSCTL_STRING(_kern, OID_AUTO, sweet_fps, CTLFLAG_RD | CTLFLAG_LOCKED, sweet_fps_stat, sizeof(sweet_fps_stat),
++    "last SWEET FPS second: seq frames ms gap_ms late present_us after_us");
++
+ static bool
+ sweet_sample_wanted(const char *name)
+ {
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 77a9dfe..bb0f467 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -5,6 +5,8 @@
+  * two, and how many came more than 20 ms after the one before (a vsync missed).
+  */
+ static uint64_t sweet_fps_wait_ns, sweet_fps_after_ns;  /* this second: latch waits, tick-to-swap */
++extern "C" char sweet_fps_stat[128];    /* bsd/dev/sweet_sample.c: sysctl kern.sweet_fps */
++static uint32_t sweet_fps_seq;
+ 
+ static void
+ sweet_fps_count(void)
+@@ -44,6 +46,9 @@ sweet_fps_count(void)
+ 		IOLog("SWEET FPS: %u frames in %llu ms, longest gap %llu ms, %u late; a frame: %llu us in present + latch, "
+ 		    "came %llu us after the tick\n", frames, ns / 1000000, gap_max / 1000000, late,
+ 		    frames ? sweet_fps_wait_ns / 1000 / frames : 0, frames ? sweet_fps_after_ns / 1000 / frames : 0);
++		snprintf(sweet_fps_stat, sizeof(sweet_fps_stat), "%u %u %llu %llu %u %llu %llu", ++sweet_fps_seq, frames,
++		    ns / 1000000, gap_max / 1000000, late,
++		    frames ? sweet_fps_wait_ns / 1000 / frames : 0, frames ? sweet_fps_after_ns / 1000 / frames : 0);
+ 		sweet_fps_wait_ns = sweet_fps_after_ns = 0;
+ 		window = now;
+ 		frames = late = 0;
