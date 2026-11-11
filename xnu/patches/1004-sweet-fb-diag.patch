@@ -1,0 +1,52 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 30feea0..dd90577 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -54,6 +54,8 @@ static uint64_t sweet_fps_tick;         /* mach time of the last vsync tick (SWE
+ static uint64_t sweet_tick_present_ns;  /* this second: time in present() on the vsync tick (SWEET FPS "present") */
+ static uint32_t sweet_fps_nticks;       /* this second: vsync ticks fired, and the longest gap between two (mach time) */
+ static uint64_t sweet_fps_tgap_max, sweet_fps_tick_prev;
++/* diagnostics (kern.sweet_fps): were the display modes published, and what CoreAnimation asks for in selector 79 */
++static uint32_t sweet_diag_modes, sweet_diag_n79, sweet_diag_s0, sweet_diag_osz, sweet_diag_flags;
+ 
+ /* boot-arg sweetfb_nohold=1 (a test): frames on the panel are not marked in use */
+ static bool
+@@ -196,9 +198,10 @@ sweet_fps_count(void)
+ 		IOLog("SWEET FPS: %u frames in %llu ms, longest gap %llu ms, %u late; a frame: %llu us in present + latch, "
+ 		    "came %llu us after the tick; %u ticks, longest tick gap %llu ms\n", frames, ns / 1000000, gap_max / 1000000, late,
+ 		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0, sweet_fps_nticks, tgap_ns / 1000000);
+-		snprintf(sweet_fps_stat, sizeof(sweet_fps_stat), "%u %u %llu %llu %u %llu %llu %u %llu", ++sweet_fps_seq, frames,
++		snprintf(sweet_fps_stat, sizeof(sweet_fps_stat), "%u %u %llu %llu %u %llu %llu %u %llu %u %u %x %u %x", ++sweet_fps_seq, frames,
+ 		    ns / 1000000, gap_max / 1000000, late,
+-		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0, sweet_fps_nticks, tgap_ns / 1000000);
++		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0, sweet_fps_nticks, tgap_ns / 1000000,
++		    sweet_diag_modes, sweet_diag_n79, sweet_diag_s0, sweet_diag_osz, sweet_diag_flags);
+ 		sweet_fps_wait_ns = sweet_fps_after_ns = sweet_tick_present_ns = 0;
+ 		sweet_fps_nticks = 0;
+ 		sweet_fps_tgap_max = 0;
+@@ -228,6 +231,7 @@ AppleCLCD::swap(const uint8_t *rec)
+ 		setProperty("TimingElements", timings);
+ 		setProperty("ColorElements", colors);
+ 		IOLog("SWEET FB: modes published: %ux%u at 60 Hz\n", fLogicalW, fLogicalH);
++		sweet_diag_modes = 1;
+ 	}
+ 	OSSafeReleaseNULL(timings);
+ 	OSSafeReleaseNULL(colors);
+@@ -255,11 +259,17 @@ AppleCLCD::swap(const uint8_t *rec)
+ 		 * Block 0x40, the current mode: its colour and timing identifiers (publishModes). Zeros
+ 		 * here left CoreAnimation without a mode, and its frame clock without the rate.
+ 		 */
++		sweet_diag_n79++;
++		sweet_diag_s0 = args->scalarInputCount >= 1 ? (uint32_t)args->scalarInput[0] : 0xffffffffu;
++		sweet_diag_osz = args->structureOutputSize;
++		sweet_diag_flags = (args->structureOutput != NULL ? 1 : 0) | (args->structureOutputDescriptor != NULL ? 2 : 0) |
++		    ((args->scalarInputCount & 7) << 4);
+ 		if (args->structureOutput != NULL && args->structureOutputDescriptor == NULL) {
+ 			bzero(args->structureOutput, args->structureOutputSize);
+ 			if (args->scalarInputCount >= 1 && args->scalarInput[0] == 0x40 && args->structureOutputSize >= 12) {
+ 				uint32_t ids[2] = { SWEET_FB_COLOR_ID, SWEET_FB_TIMING_ID };
+ 				memcpy((uint8_t *)args->structureOutput + 4, ids, sizeof(ids));
++				sweet_diag_flags |= 0x100;      /* ids returned */
+ 			}
+ 			return kIOReturnSuccess;
+ 		}
