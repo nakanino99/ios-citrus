@@ -1,0 +1,48 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 05324a9..40a7b9b 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -5,6 +5,11 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
+ 	sweet_fps_tick = now;
++	sweet_fps_nticks++;
++	if (sweet_fps_tick_prev != 0 && now - sweet_fps_tick_prev > sweet_fps_tgap_max) {
++		sweet_fps_tgap_max = now - sweet_fps_tick_prev;
++	}
++	sweet_fps_tick_prev = now;
+ 	/*
+ 	 * What QuartzCore reads (darwin-redwood MiniIOMobileFramebuffer): three 64-bit numbers as six
+ 	 * halves -- the time of this refresh, the time it was presented, a counter. The counter came
+@@ -47,6 +52,8 @@ bool topaz_surface_drawn(SweetSurface *surface, uint64_t milliseconds);   /* Red
+  */
+ static uint64_t sweet_fps_tick;         /* mach time of the last vsync tick (SWEET FPS) */
+ static uint64_t sweet_tick_present_ns;  /* this second: time in present() on the vsync tick (SWEET FPS "present") */
++static uint32_t sweet_fps_nticks;       /* this second: vsync ticks fired, and the longest gap between two (mach time) */
++static uint64_t sweet_fps_tgap_max, sweet_fps_tick_prev;
+ 
+ /* boot-arg sweetfb_nohold=1 (a test): frames on the panel are not marked in use */
+ static bool
+@@ -183,14 +190,18 @@ sweet_fps_count(void)
+ 	gap_max = gap > gap_max ? gap : gap_max;
+ 	absolutetime_to_nanoseconds(now - window, &ns);
+ 	if (ns >= 1000000000ull) {
++		uint64_t tgap_ns = 0;
++		absolutetime_to_nanoseconds(sweet_fps_tgap_max, &tgap_ns);
+ 		uint64_t present_us = frames ? (sweet_fps_wait_ns + sweet_tick_present_ns) / 1000 / frames : 0;
+ 		IOLog("SWEET FPS: %u frames in %llu ms, longest gap %llu ms, %u late; a frame: %llu us in present + latch, "
+-		    "came %llu us after the tick\n", frames, ns / 1000000, gap_max / 1000000, late,
+-		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0);
+-		snprintf(sweet_fps_stat, sizeof(sweet_fps_stat), "%u %u %llu %llu %u %llu %llu", ++sweet_fps_seq, frames,
++		    "came %llu us after the tick; %u ticks, longest tick gap %llu ms\n", frames, ns / 1000000, gap_max / 1000000, late,
++		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0, sweet_fps_nticks, tgap_ns / 1000000);
++		snprintf(sweet_fps_stat, sizeof(sweet_fps_stat), "%u %u %llu %llu %u %llu %llu %u %llu", ++sweet_fps_seq, frames,
+ 		    ns / 1000000, gap_max / 1000000, late,
+-		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0);
++		    present_us, frames ? sweet_fps_after_ns / 1000 / frames : 0, sweet_fps_nticks, tgap_ns / 1000000);
+ 		sweet_fps_wait_ns = sweet_fps_after_ns = sweet_tick_present_ns = 0;
++		sweet_fps_nticks = 0;
++		sweet_fps_tgap_max = 0;
+ 		window = now;
+ 		frames = late = 0;
+ 		gap_max = 0;
