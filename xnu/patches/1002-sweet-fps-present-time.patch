@@ -18,7 +18,7 @@ index 81ab9d0..edbf610 100644
  	uint8_t *rec = NULL;
  	SweetSurface *taken[4] = {};
  	if (flush) {
-@@ -57,14 +59,28 @@ sweet_fb_nohold(void)
+@@ -57,8 +59,44 @@ sweet_fb_nohold(void)
  		fb->flipBack();
  	}
  	if (rec != NULL) {
@@ -31,15 +31,31 @@ index 81ab9d0..edbf610 100644
 +			sender->setTimeoutUS(SWEET_FB_VSYNC_US);        /* counted from the start of the copy, not its end */
 +			armed = true;
 +		}
-+		uint64_t t0 = mach_absolute_time(), dt = 0;
- 		fb->present(rec);
-+		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &dt);
-+		sweet_tick_present_ns += dt;
- 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
- 		IOLockLock(fb->fLock);
- 		memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
- 		memcpy(fb->fShowHold, taken, sizeof(taken));
- 		IOLockUnlock(fb->fLock);
++		if (fb->fCtl0 == NULL && fb->fQLock != NULL) {
++			IOLockLock(fb->fQLock);
++			if (fb->fQWaiting < 2) {
++				unsigned slot = (fb->fQFirst + fb->fQWaiting) % 2;
++				memcpy(fb->fQRec[slot], rec, SWEET_FB_SWAP_REC_SIZE);
++				memcpy(fb->fQHeld[slot], taken, sizeof(taken));
++				fb->fQWaiting++;
++				IOLockWakeup(fb->fQLock, fb->fQRec, true);
++				IOLockUnlock(fb->fQLock);
++			} else {
++				IOLockUnlock(fb->fQLock);
++				sweet_hold_set(taken, false);
++			}
++			IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++		} else {
++			uint64_t t0 = mach_absolute_time(), dt = 0;
++			fb->present(rec);
++			absolutetime_to_nanoseconds(mach_absolute_time() - t0, &dt);
++			sweet_tick_present_ns += dt;
++			IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
++			IOLockLock(fb->fLock);
++			memcpy(fb->fRetireHold, fb->fShowHold, sizeof(taken));
++			memcpy(fb->fShowHold, taken, sizeof(taken));
++			IOLockUnlock(fb->fLock);
++		}
  	}
 -	sender->setTimeoutUS(fb->fVLock ? fb->vsyncNext() : SWEET_FB_VSYNC_US);
 +	if (!armed) {
@@ -48,7 +64,7 @@ index 81ab9d0..edbf610 100644
  }
  
  /*
-@@ -129,13 +145,14 @@ sweet_fps_count(void)
+@@ -129,13 +156,14 @@ sweet_fps_count(void)
  	gap_max = gap > gap_max ? gap : gap_max;
  	absolutetime_to_nanoseconds(now - window, &ns);
  	if (ns >= 1000000000ull) {

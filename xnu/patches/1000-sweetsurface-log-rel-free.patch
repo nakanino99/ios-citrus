@@ -9,7 +9,7 @@ index 74f982e..ca9c31f 100644
 +static uint32_t      sweet_surface_nrel, sweet_surface_nfree;    /* diagnostics: releases from userland, surfaces freed */
  static uint32_t      sweet_surface_creates_logged;
  static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
- #define SWEET_SURFACE_WIRED_MAX         (1536ull << 20)
+ #define SWEET_SURFACE_WIRED_MAX         (1024ull << 20)
 @@ -285,6 +286,7 @@ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
  void
  SweetSurface::free()
@@ -32,7 +32,7 @@ index 74f982e..ca9c31f 100644
  	}
  	props->release();
  	if (ret != kIOReturnSuccess) {
-@@ -1664,6 +1667,9 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
+@@ -1664,14 +1667,18 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
  	if (ref == NULL) {
  		ref = findRef((uint32_t)(uintptr_t)id, &index);
  	}
@@ -42,3 +42,12 @@ index 74f982e..ca9c31f 100644
  	if (ref != NULL && --ref->count == 0) {
  		/*
  		 * The pixels are unmapped now; the state page (read-only) stays mapped a while.
+ 		 * In backboardd another IOSurface object can still hold a framework client of
+ 		 * the same surface after this one is released (CoreAnimation and the GL layer
+ 		 * both keep surfaces): reading its seed from an unmapped page crashed
+ 		 * backboardd in IOSurfaceClientGetSeed. The last 256 released views keep
+ 		 * their page (16 KB each), the oldest goes first.
+ 		 */
+ 		OSSafeReleaseNULL(ref->data);
+ 		sweet_surface_put(ref->surface);
++		OSSafeReleaseNULL(ref->surface);
