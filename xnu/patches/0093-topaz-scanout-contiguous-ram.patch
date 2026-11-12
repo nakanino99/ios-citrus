@@ -13,7 +13,7 @@ index bacf85e..f10f548 100644
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -76,8 +76,7 @@ static uint32_t      sweet_surface_creates_logged;
  static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
- #define SWEET_SURFACE_WIRED_MAX         (1536ull << 20)
+ #define SWEET_SURFACE_WIRED_MAX         (1024ull << 20)
  
 -/* topaz scanout pool: 6 x 16 MiB at 0xb0000000 (sweet's old low-memory kernel window) */
 -#define SWEET_SCANOUT_BASE      0xb0000000ull

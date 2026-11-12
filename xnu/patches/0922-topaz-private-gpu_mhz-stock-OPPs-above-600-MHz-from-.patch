@@ -40,8 +40,8 @@ index 4dfdfa4..b7f5330 100644
 +zonda_la(uint32_t mhz, uint32_t *l, uint32_t *a)
 +{
 +	static const uint32_t t[][3] = {
-+		{ 320, 17, 0xAAAB }, { 465, 24, 0x3800 }, { 600, 31, 0x4000 }, { 785, 41, 0xE2AA }, { 820, 43, 0xB555 },
-+		{ 980, 51, 0x0AAB }, { 1025, 53, 0x62AA }, { 1100, 57, 0x4AAB }, { 1260, 66, 0xA000 },
++		{ 320, 16, 0xAAAB }, { 465, 24, 0x3800 }, { 600, 31, 0x4000 }, { 745, 38, 0xCD55 }, { 820, 42, 0xB555 },
++		{ 900, 46, 0xE000 }, { 950, 49, 0x7AAB },
 +	};
 +	for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
 +		if (t[i][0] == mhz) {
@@ -59,7 +59,7 @@ index 4dfdfa4..b7f5330 100644
 +	uint32_t l, a;
 +
 +	if (!zonda_la(mhz, &l, &a)) {
-+		IOLog("TopazGPU: gpu_mhz=%u is not a stock OPP (320 465 600 785 820 980 1025 1100 1260)\n", mhz);
++		IOLog("TopazGPU: gpu_mhz=%u is not a stock OPP (320 465 600 745 820 900 950)\n", mhz);
 +		return false;
 +	}
 +	rmw(gpucc, ZP_MODE, ZP_OUTCTRL, 0);
