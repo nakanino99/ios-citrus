@@ -98,6 +98,7 @@ jobs:
       - name: Build
         working-directory: dxb
         env:
+          TOPAZ_4K: "1"
           # keep going after errors so one run reports every compile failure
           MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
         run: |

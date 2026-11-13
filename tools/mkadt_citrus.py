@@ -31,7 +31,7 @@ GICD, GICD_SIZE = 0x0f200000, 0x10000
 GICR, GICR_SIZE = 0x0f300000, 0x100000
 # cont_splash_region left lit by ABL
 FB, FB_SIZE = 0x5c000000, 0xf00000
-SWEET_ECID = 0x4349545255000001  # 'CITRU' + 1, synthetic
+SWEET_ECID = 0x544f50415a000001  # 'CITRU' + 1, synthetic
 FB_W, FB_H, FB_STRIDE = 1080, 2340, 1080 * 4
 # Internal UFS host (ufshc@4804000 "ufs_mem"); QEMU virt has none
 UFS, UFS_SIZE = 0x04804000, 0x3000
@@ -128,33 +128,38 @@ def build(seed=None, qemu=False, highmem=False, native=False, midmem=False):
         # with CSR_ALLOW_UNRESTRICTED_FS (vm_unix.c shared region checks).
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
-    # TOPAZ SMP: only the four Cortex-A73 (gold) cores, MPIDR 0x100-0x103:
-    # the Kryo 260 Silver cores have no 16K granule, so the shim boots xnu
-    # on gold CPU 0x100 and parks the silver cluster. One cluster. The kernel defaults to one
-    # and uses cpus=N to select an initial prefix (N <= 8).
-    # QEMU retains its original single-CPU tree: its MPIDRs differ from sweet.
+    # TOPAZ_4K=1: gold A73 (P, MPIDR 0x100-3) = logical 0-3, silver A53 (E, MPIDR 0-3) = 4-7.
+    eight = (not qemu) and os.environ.get('TOPAZ_4K') == '1'
     cpu_nodes = []
-    for core in range(1 if qemu else 4):
-        cpu_nodes.append(node(f'cpu{core}', [
+    def mk_cpu(lid, mpidr, cid, ctype, l2, freq, running):
+        return node(f'cpu{lid}', [
             ph(),
             ('device_type', cstr('cpu')),
             ('compatible', cstr('qcom,kryo260') + cstr('qcom,kryo470') + cstr('ARM,v8')),
-            ('reg', u32(core if qemu else 0x100 | core)),  # actual MPIDR Aff1:Aff0, NOT logical ID
-            ('cpu-id', u32(core)),   # descriptive: XNU assigns IDs by DT order
-            ('cluster-id', u32(0)),  # descriptive; see ml_parse_cpu_topology
-            ('cluster-type', u32(0)),  # homogeneous CLUSTER_TYPE_SMP, not AMP
+            ('reg', u32(mpidr)),
+            ('cpu-id', u32(lid)),
+            ('cluster-id', u32(cid)),
+            ('cluster-type', ctype),
             ('die-cluster-id', u32(0)),
-            ('cluster-core-id', u32(core)),
-            ('l2-cache-id', u32(0)),  # gold L2
+            ('cluster-core-id', u32(lid % 4)),
+            ('l2-cache-id', u32(l2)),
             ('l3-cache-id', u32(0)),
-            ('state', cstr('running' if core == 0 else 'stopped')),
+            ('state', cstr('running' if running else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32(2000000000)),
+            ('clock-frequency', u32(freq)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
             ('fixed-frequency', u32(timebase)),
-        ]))
+        ])
+    if eight:
+        for c in range(4):
+            cpu_nodes.append(mk_cpu(c, 0x100 | c, 0, cstr('P'), 0, 2000000000, c == 0))
+        for c in range(4):
+            cpu_nodes.append(mk_cpu(4 + c, c, 1, cstr('E'), 1, 1800000000, False))
+    else:
+        for core in range(1 if qemu else 4):
+            cpu_nodes.append(mk_cpu(core, core if qemu else 0x100 | core, 0, u32(0), 0, 2000000000, core == 0))
     cpus = node('cpus', [ph(), ('#address-cells', u32(1)),
                          ('#size-cells', u32(0))], cpu_nodes)
 
