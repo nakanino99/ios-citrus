@@ -1,0 +1,79 @@
+name: gpu-userland
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install meson ninja bison pkg-config
+
+      - name: Cache Mesa source & build
+        uses: actions/cache@v4
+        with:
+          path: userland/build-mesa
+          key: mesa-25.0.7-${{ hashFiles('userland/mesa/**') }}
+
+      - name: Build libOSMesa.8.dylib (freedreno + softpipe)
+        working-directory: userland
+        run: |
+          mkdir -p build-mesa
+          cp mesa/mk-mesa-mac.sh ./mk-mesa-mac.sh
+          chmod +x ./mk-mesa-mac.sh
+          ./mk-mesa-mac.sh || {
+            echo "=== meson-setup.log ==="
+            cat build-mesa/meson-setup.log 2>/dev/null || true
+            echo "=== ninja.log ==="
+            tail -n 100 build-mesa/ninja.log 2>/dev/null || true
+            exit 1
+          }
+          ls -lh build-mesa/out/
+
+      - name: Build libtopaz-gl.dylib, libtopaz-inject.dylib, and bbd_wrap
+        working-directory: userland
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CC=$(xcrun --sdk iphoneos -f clang)
+          M="$PWD/build-mesa/out"
+          mkdir -p out/topaz/lib out/obj
+
+          python3 gpu/mkeagl.py gpu/eagl_slots.txt "$M/gl.xml" "$M/exported-gl.txt" gpu/eagl.c > out/obj/eagl_gen.h
+
+          DYN=("$CC" -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wno-deprecated-declarations)
+
+          # 1. libtopaz-gl.dylib
+          "${DYN[@]}" -dynamiclib -install_name /topaz/lib/libtopaz-gl.dylib \
+            -Iout/obj -Igpu \
+            -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc \
+            "$M/libOSMesa.8.dylib" \
+            -o out/topaz/lib/libtopaz-gl.dylib \
+            gpu/eagl.c gpu/gl_osmesa.c
+
+          # 2. libtopaz-inject.dylib
+          "${DYN[@]}" -dynamiclib -install_name /topaz/lib/libtopaz-inject.dylib \
+            -framework CoreFoundation -framework IOKit -lobjc \
+            -o out/topaz/lib/libtopaz-inject.dylib \
+            gpu/topaz_inject.c
+
+          # 3. bbd_wrap (opsional cadangan wrapper backboardd)
+          "${DYN[@]}" -o out/topaz/bbd_wrap gpu/bbd_wrap.c
+
+          # 4. Salin libOSMesa.8.dylib dan beri ad-hoc signature pada semua binary
+          cp "$M/libOSMesa.8.dylib" out/topaz/lib/
+          for f in out/topaz/lib/*.dylib out/topaz/bbd_wrap; do
+            codesign -f -s - "$f"
+            otool -L "$f"
+          done
+          ls -lh out/topaz/lib/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: topaz-gpu-userland
+          path: userland/out/topaz/
+          retention-days: 30
