@@ -1,0 +1,10 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -38,6 +38,7 @@
+ void sweet_usb_probe(void);
+ static void sweet_usb_gadget_start(vm_offset_t dwc);
+ extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern kern_return_t thread_terminate(thread_t);
+ 
+ #define GCC_PA                  0x01400000
+ #define GCC_SIZE                0x001f0000
