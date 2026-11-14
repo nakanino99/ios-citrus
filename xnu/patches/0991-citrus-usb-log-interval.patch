@@ -1,0 +1,24 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -781,6 +781,12 @@
+ 	socket_t so = NULL;
+ 	struct sockaddr_in to;
+ 	uint64_t pos = sweet_log_position();
++	int ms = 10;
++
++	(void)PE_parse_boot_argn("sweetusblogms", &ms, sizeof(ms));
++	if (ms < 1) {
++		ms = 1;
++	}
+ 
+ 	pos = pos > 65536 ? pos - 65536 : 0;
+ 	bzero(&to, sizeof(to));
+@@ -789,7 +795,7 @@
+ 	to.sin_port = htons(5140);
+ 	to.sin_addr.s_addr = htonl(0xc0a80701);         /* 192.168.7.1 */
+ 	for (;;) {
+-		ud_sleep_ms(100);
++		ud_sleep_ms(ms);
+ 		if (!ud.configured) {
+ 			continue;
+ 		}
