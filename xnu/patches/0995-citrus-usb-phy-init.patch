@@ -1,0 +1,82 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -135,6 +135,64 @@
+ 	}
+ }
+ 
++/* citrus QUSB2 PHY (msm8996 layout, SM6115 init table from mainline); registers are byte wide. */
++static uint8_t
++cq_rd(vm_offset_t b, uint32_t o)
++{
++	uint8_t v = *(volatile uint8_t *)(b + o);
++	__asm__ volatile ("dmb oshld" ::: "memory");
++	return v;
++}
++
++static void
++cq_wr(vm_offset_t b, uint32_t o, uint8_t v)
++{
++	*(volatile uint8_t *)(b + o) = v;
++	__asm__ volatile ("dsb sy" ::: "memory");
++}
++
++static void
++citrus_qusb2_init(vm_offset_t gcc)
++{
++	vm_offset_t phy = ml_io_map(QUSB2_PA, QUSB2_SIZE);
++	uint8_t pll_test;
++
++	if (phy == 0) {
++		printf("SWEET USB: QUSB2 map failed\n");
++		return;
++	}
++	/* GCC_QUSB2PHY_PRIM_BCR pulse */
++	cu_wr(gcc, 0x1c000, 1);
++	delay(150);
++	cu_wr(gcc, 0x1c000, 0);
++	delay(150);
++	/* disable PHY: CLAMP_N_EN | FREEZIO_N | POWER_DOWN */
++	cq_wr(phy, 0xb4, cq_rd(phy, 0xb4) | 0x23);
++	pll_test = cq_rd(phy, 0x04);
++	/* sm6115_init_tbl */
++	cq_wr(phy, 0x80, 0xf8);
++	cq_wr(phy, 0x84, 0x53);
++	cq_wr(phy, 0x88, 0x81);
++	cq_wr(phy, 0x8c, 0x17);
++	cq_wr(phy, 0x08, 0x30);
++	cq_wr(phy, 0x0c, 0x79);
++	cq_wr(phy, 0x10, 0x21);
++	cq_wr(phy, 0x9c, 0x14);
++	cq_wr(phy, 0x1c, 0x9f);
++	cq_wr(phy, 0x18, 0x00);
++	/* enable PHY */
++	cq_wr(phy, 0xb4, cq_rd(phy, 0xb4) & ~0x01);
++	delay(160);
++	/* single-ended clock scheme (se_clk_scheme_default): CLK_REF_SEL */
++	cq_wr(phy, 0x04, pll_test | 0x80);
++	delay(110);
++	uint8_t st = cq_rd(phy, 0x38);
++	printf("SWEET USB: QUSB2 init PLL_STATUS 0x%02x (%s) TUNE %02x %02x %02x %02x POWERDOWN 0x%02x PLL_TEST 0x%02x\n",
++	    st, (st & 0x20) ? "locked" : "NOT locked",
++	    cq_rd(phy, 0x80), cq_rd(phy, 0x84), cq_rd(phy, 0x88), cq_rd(phy, 0x8c),
++	    cq_rd(phy, 0xb4), cq_rd(phy, 0x04));
++}
++
+ void
+ sweet_usb_probe(void)
+ {
+@@ -194,6 +252,14 @@
+ 	printf("SWEET USB: DWC3 GEVNTADR 0x%08x%08x GEVNTSIZ 0x%08x GEVNTCOUNT 0x%08x GHWPARAMS0 0x%08x\n",
+ 	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+ 	    usb_rd(dwc, 0xc140));
++	{
++		int ph = 0;
++
++		PE_parse_boot_argn("sweetusbphy", &ph, sizeof(ph));
++		if (ph && !(cbcr[5] & CBCR_CLK_OFF)) {
++			citrus_qusb2_init(gcc);
++		}
++	}
+ 	if (enabled >= 2) {
+ 		sweet_usb_gadget_start(dwc);
+ 	}
