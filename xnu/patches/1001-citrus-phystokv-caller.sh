@@ -1,25 +1,18 @@
 #!/bin/bash
-# Diagnostik sementara: pemanggil phystokv_range ikut tercetak di panic "illegal PA".
-# dxb menjalankan skrip ini dari root source XNU, sebelum *.patch diterapkan.
 set -euo pipefail
 [[ "${MACHINE_CONFIG:-}" == SWEET ]] || exit 0
-f=${1:-.}/osfmk/arm64/arm_vm_init.c
-[[ -f $f ]] || { echo "tidak ada $f" >&2; exit 1; }
+f=osfmk/arm64/arm_vm_init.c
+echo "1001: cwd=$PWD"
+[[ -f $f ]] || { echo "1001: tidak ada $f" >&2; exit 1; }
+grep -n "illegal PA" "$f" || true
 python3 - "$f" <<'EOF'
-import sys
+import re, sys
 p = sys.argv[1]
 s = open(p).read()
-if '[caller %p]' in s:
-    sys.exit(0)
-k = 'panic("%s: illegal PA: '
-i = s.find(k)
-if i < 0:
-    sys.exit('teks panic tidak ditemukan')
-j = s.find('__func__,', i)
-if j < 0 or j - i > 200:
-    sys.exit('__func__ tidak ada dekat panic')
-s = (s[:i] + 'panic("%s [caller %p]: illegal PA: ' + s[i+len(k):j]
-     + '__func__, __builtin_return_address(0),' + s[j+len('__func__,'):])
+s, n = re.subn(r'panic\("%s: illegal PA:([^"]*)",(\s*)([^,()]+),',
+               r'panic("%s [caller %p]: illegal PA:\1",\2\3, __builtin_return_address(0),', s)
+print('1001: diubah', n, 'tempat')
+if n < 2:
+    sys.exit('1001: kurang dari 2 tempat cocok')
 open(p, 'w').write(s)
-print('patched', p)
 EOF
