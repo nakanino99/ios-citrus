@@ -1,0 +1,54 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -431,6 +431,7 @@
+ 	}
+ 	printf("SWEET USB: ep%u cmd 0x%x timeout DEPCMD 0x%08x DSTS 0x%08x GUSB2PHYCFG 0x%08x\n",
+ 	    ep, cmd & 0xf, dwc_rd(DEPCMD(ep)), dwc_rd(DSTS), dwc_rd(0xc200));
++	ud_dump();
+ 	return -1;
+ }
+ 
+@@ -523,6 +524,7 @@
+ 
+ static void ud_rx_arm(void);
+ static void ud_tx_kick_locked(void);
++static void ud_dump(void);
+ 
+ /* NETWORK_CONNECTION notification: the host brings its link up on it. */
+ static void
+@@ -1014,6 +1016,35 @@
+ 		}
+ 	}
+ }
++
++/* Named register dump (same names as Linux dwc3 debugfs regdump) for comparing with a working kernel. */
++static void
++ud_dump(void)
++{
++	static const struct {
++		const char *n;
++		uint32_t    o;
++	} r[] = {
++		{ "GSBUSCFG0", 0xc100 }, { "GSBUSCFG1", 0xc104 }, { "GTXTHRCFG", 0xc108 }, { "GRXTHRCFG", 0xc10c },
++		{ "GCTL", 0xc110 }, { "GEVTEN", 0xc114 }, { "GUCTL1", 0xc11c }, { "GUCTL", 0xc12c },
++		{ "GHWPARAMS1", 0xc144 }, { "GHWPARAMS3", 0xc14c }, { "GHWPARAMS4", 0xc150 }, { "GHWPARAMS6", 0xc158 },
++		{ "GHWPARAMS7", 0xc15c }, { "GUSB2PHYCFG", 0xc200 }, { "GUSB3PIPECTL", 0xc2c0 },
++		{ "GTXFIFOSIZ0", 0xc300 }, { "GTXFIFOSIZ1", 0xc304 }, { "GRXFIFOSIZ0", 0xc380 }, { "GUCTL2", 0xc608 },
++		{ "DCFG", 0xc700 }, { "DCTL", 0xc704 }, { "DEVTEN", 0xc708 }, { "DSTS", 0xc70c }, { "DALEPENA", 0xc720 },
++	};
++	char b[160];
++	size_t l = 0;
++
++	b[0] = 0;
++	for (unsigned i = 0; i < sizeof(r) / sizeof(r[0]); i++) {
++		l += snprintf(b + l, sizeof(b) - l, "%s=%08x ", r[i].n, dwc_rd(r[i].o));
++		if ((i % 4) == 3 || i == sizeof(r) / sizeof(r[0]) - 1) {
++			printf("SWEET USB: dump %s\n", b);
++			l = 0;
++			b[0] = 0;
++		}
++	}
++}
+ 
+ static void
+ sweet_usb_gadget_start(vm_offset_t dwc)
