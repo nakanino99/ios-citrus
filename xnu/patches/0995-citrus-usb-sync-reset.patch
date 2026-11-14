@@ -1,0 +1,37 @@
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -429,7 +429,8 @@
+ 		}
+ 		delay(1);
+ 	}
+-	printf("SWEET USB: ep%u cmd 0x%x timeout\n", ep, cmd & 0xf);
++	printf("SWEET USB: ep%u cmd 0x%x timeout DEPCMD 0x%08x DSTS 0x%08x GUSB2PHYCFG 0x%08x\n",
++	    ep, cmd & 0xf, dwc_rd(DEPCMD(ep)), dwc_rd(DSTS), dwc_rd(0xc200));
+ 	return -1;
+ }
+ 
+@@ -1041,6 +1042,24 @@
+ 		ud_if_create();
+ 	}
+ 
++	/* sweetusbsync=1: Linux dwc3_core_soft_reset() order, re-sync the controller with the PHY clock. */
++	{
++		int sync = 0;
++
++		PE_parse_boot_argn("sweetusbsync", &sync, sizeof(sync));
++		if (sync) {
++			dwc_wr(GCTL, dwc_rd(GCTL) | (1u << 11));                /* CORESOFTRESET */
++			dwc_wr(0xc2c0, dwc_rd(0xc2c0) | (1u << 31));            /* GUSB3PIPECTL.PHYSOFTRST */
++			dwc_wr(0xc200, dwc_rd(0xc200) | (1u << 31));            /* GUSB2PHYCFG.PHYSOFTRST */
++			delay(50000);
++			dwc_wr(0xc2c0, dwc_rd(0xc2c0) & ~(1u << 31));
++			dwc_wr(0xc200, dwc_rd(0xc200) & ~(1u << 31));
++			dwc_wr(GCTL, dwc_rd(GCTL) & ~(1u << 11));
++			delay(1000);
++			printf("SWEET USB: phy sync done, GCTL 0x%08x GUSB2PHYCFG 0x%08x GUSB3PIPECTL 0x%08x\n",
++			    dwc_rd(GCTL), dwc_rd(0xc200), dwc_rd(0xc2c0));
++		}
++	}
+ 	/* Device controller soft reset (PHY and global setup stay as ABL left them). */
+ 	dwc_wr(DCTL, DCTL_CSFTRST);
+ 	int i;
