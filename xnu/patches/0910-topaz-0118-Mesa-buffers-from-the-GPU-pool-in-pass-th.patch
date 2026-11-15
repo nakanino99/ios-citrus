@@ -126,7 +126,7 @@ index 940b37f..f19d9f5 100644
  #define GPU_POOL_BASE       0x90000000ull
 -#define GPU_POOL_SIZE       0x20000000ull       /* 512 MB */
 -static uint64_t gpu_pool_next = GPU_POOL_BASE;
-+#define GPU_POOL_SIZE       0x30000000ull       /* 768 MB */
++#define GPU_POOL_SIZE       0x20000000ull       /* 512 MB */
 +#define GPU_POOL_UNIT       0x10000ull          /* 64 KB */
 +static uint8_t *gpu_pool_va;                    /* the whole pool, mapped once, write-combined */
 +static struct { uint64_t start, size; } pool_free[2048];

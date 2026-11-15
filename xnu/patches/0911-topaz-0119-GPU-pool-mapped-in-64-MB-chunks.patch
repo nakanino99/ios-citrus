@@ -13,7 +13,7 @@ index f19d9f5..48c880c 100644
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -162,7 +162,10 @@ kbuf_pa(struct kbuf *b, uint64_t off)
  #define GPU_POOL_BASE       0x90000000ull
- #define GPU_POOL_SIZE       0x30000000ull       /* 768 MB */
+ #define GPU_POOL_SIZE       0x20000000ull       /* 512 MB */
  #define GPU_POOL_UNIT       0x10000ull          /* 64 KB */
 -static uint8_t *gpu_pool_va;                    /* the whole pool, mapped once, write-combined */
 +#define GPU_POOL_CHUNK      0x4000000ull        /* 64 MB: mapped on first use (1 GB at once is more IO space than there is) */
