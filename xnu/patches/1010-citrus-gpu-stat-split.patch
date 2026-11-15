@@ -40,7 +40,7 @@
  }
  
 +/* Diagnostic: last submission number, the fence value the GPU last wrote to mem+0, ring pointers, RBBM_STATUS. */
-+extern "C" void
++void
 +redwood_gpu_state(uint32_t *seq, uint32_t *fence, uint32_t *rptr, uint32_t *wptr_out, uint32_t *rbbm)
 +{
 +	*seq = seqno;
