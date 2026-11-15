@@ -1,0 +1,23 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -197,7 +197,9 @@
+ 		sweet_res_free[i] = mem[i];
+ 	}
+ 	IOLockUnlock(sweet_surface_lock);
+-	IOLog("SWEET SURF: %u contiguous buffers of %u MB set aside for screen-sized surfaces\n", n, SWEET_RES_SIZE >> 20);
++	char nm[32];
++	proc_selfname(nm, sizeof(nm));
++	IOLog("SWEET SURF: %u contiguous buffers of %u MB set aside for screen-sized surfaces (by %s)\n", n, SWEET_RES_SIZE >> 20, nm);
+ }
+ 
+ static IOBufferMemoryDescriptor *
+@@ -501,6 +503,9 @@
+ 			gpu = 0;
+ 		}
+ 	}
++	if (gpu) {
++		sweet_res_fill();       /* once, at the first surface (backboardd's): the RAM is not fragmented yet */
++	}
+ 	if (!(gpu && s->bytesPerElement == 4 && s->planeCount <= 1 && s->elementWidth == 1 && s->elementHeight == 1 &&
+ 	    s->width >= 1000 && s->height >= 2000 && s->allocSize <= (48u << 20))) {
+ 		return false;
