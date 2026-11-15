@@ -1,0 +1,99 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -468,6 +468,57 @@
+ 	return s;
+ }
+ 
++/*
++ * citrus: a screen-sized surface from the GPU pool, for the framebuffer's layer default surface
++ * (boot-arg sweetfb_pooldef=1). The panel memory the boot loader set up has 4320-byte rows, which the
++ * GPU is not given (RedwoodGPU shares only 64-byte aligned rows): every frame drawn into it was read
++ * back by the processor, 60 ms. 64-byte rows, drawn in place, scanned by the MDP like any pool screen.
++ */
++extern "C" SweetSurface *
++sweet_surface_create_pool(uint32_t width, uint32_t height, uint32_t pixelFormat)
++{
++	SweetSurface *s = sweet_surface_alloc();
++	void *va = NULL;
++	uint64_t take, pa;
++	IOMemoryDescriptor *md;
++
++	if (s == NULL) {
++		return NULL;
++	}
++	s->width = width;
++	s->height = height;
++	s->bytesPerRow = (width * 4 + SWEET_SURFACE_ROW_ALIGN - 1) & ~(uint32_t)(SWEET_SURFACE_ROW_ALIGN - 1);
++	s->bytesPerElement = 4;
++	s->elementWidth = s->elementHeight = 1;
++	s->pixelFormat = pixelFormat;
++	s->allocSize = (uint32_t)sweet_round_upage((uint64_t)s->bytesPerRow * height);
++	take = s->allocSize + 64ull * s->bytesPerRow;
++	pa = topaz_gpu_pool_alloc(take, &va);
++	if (pa == 0) {
++		s->release();
++		return NULL;
++	}
++	md = topaz_gpu_pool_md(pa, s->allocSize);
++	if (md == NULL) {
++		topaz_gpu_pool_free(pa, take);
++		s->release();
++		return NULL;
++	}
++	for (uint64_t i = 0; i < take; i += 8) {
++		*(volatile uint64_t *)((uint8_t *)va + i) = 0;
++	}
++	s->poolSize = take;
++	s->memory = md;
++	s->gpuPool = true;
++	s->scanoutPhys = pa;
++	s->mapCache = kIOMapDefaultCache;
++	if (!sweet_surface_publish(s)) {
++		s->release();
++		return NULL;
++	}
++	return s;
++}
++
+ mach_port_name_t
+ sweet_surface_port_in_task(SweetSurface *s, task_t task)
+ {
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1553,6 +1553,7 @@
+ 	    kIOUserNotifyOptionCanDrop);
+ }
+ 
++extern "C" SweetSurface *sweet_surface_create_pool(uint32_t width, uint32_t height, uint32_t pixelFormat);
+ static uint64_t sweet_fb_logged;        /* selectors already logged (< 64) */
+ 
+ IOReturn
+@@ -1566,7 +1567,27 @@
+ 
+ 	switch (selector) {
+ 	case kSweetFBGetLayerDefaultSurface:
+-		out[0] = sweet_surface_port_in_task(fFB->fSurface, fTask);
++		{
++		SweetSurface *def = fFB->fSurface;
++		int pooldef = 0;
++
++		PE_parse_boot_argn("sweetfb_pooldef", &pooldef, sizeof(pooldef));
++		if (pooldef) {
++			static SweetSurface *pool_def;
++
++			IOLockLock(fFB->fLock);
++			if (pool_def == NULL) {
++				pool_def = sweet_surface_create_pool(fFB->fWidth, fFB->fHeight, SWEET_FB_FORMAT_BGRA);
++				IOLog("SWEET FB: layer default surface from the GPU pool: %s\n",
++				    pool_def != NULL ? "yes" : "NO (panel memory)");
++			}
++			IOLockUnlock(fFB->fLock);
++			if (pool_def != NULL) {
++				def = pool_def;
++			}
++		}
++		out[0] = sweet_surface_port_in_task(def, fTask);
++	}
+ 		outCount = 1;
+ 		break;
+ 	case kSweetFBSwapBegin:
