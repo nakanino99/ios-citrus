@@ -1,5 +1,23 @@
+diff --git a/iokit/Kernel/arm/RedwoodGPU.cpp b/iokit/Kernel/arm/RedwoodGPU.cpp
+index a4e5569..e23b5c5 100644
+--- a/iokit/Kernel/arm/RedwoodGPU.cpp
++++ b/iokit/Kernel/arm/RedwoodGPU.cpp
+@@ -966,6 +966,13 @@ RedwoodGPUUserClient::surfaceBuffer(struct redwood_surface * request)
+ 		b->kernel = (uint8_t *) s->kernelAddress();
+ 		b->surface = s;
+ 		gGPUStat.surfaces++;
++		{
++		    static uint32_t sb_n;
++		    if ((++sb_n & 15) == 0) {
++		        IOLog("RedwoodGPU: client %#llx surface buffers made %u, now %u buffers %llu MB\n",
++		            (unsigned long long)(uintptr_t)this, sb_n, (unsigned)fBufferCount, (unsigned long long)(fBufferBytes >> 20));
++		    }
++		}
+ 	}
+ 	gGPUStat.taking += mach_absolute_time() - began;
+ 	IOLockUnlock(gGPULock);
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 74f982e..ca9c31f 100644
+index 29925ff..a7ba946 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -110,6 +110,7 @@ static IOLock       *sweet_surface_lock;
@@ -10,7 +28,7 @@ index 74f982e..ca9c31f 100644
  static uint32_t      sweet_surface_creates_logged;
  static uint64_t      sweet_surface_wired;       /* bytes of buffer surfaces */
  #define SWEET_SURFACE_WIRED_MAX         (1024ull << 20)
-@@ -285,6 +286,7 @@ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
+@@ -287,6 +288,7 @@ OSDefineMetaClassAndStructors(SweetSurface, OSObject);
  void
  SweetSurface::free()
  {
@@ -18,7 +36,7 @@ index 74f982e..ca9c31f 100644
  	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
  		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&sweet_surface_wired);
  	}
-@@ -1118,10 +1120,11 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+@@ -1174,10 +1176,11 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
  		char name[32];
  		proc_selfname(name, sizeof(name));
  		sweet_surface_creates_logged++;
@@ -32,22 +50,57 @@ index 74f982e..ca9c31f 100644
  	}
  	props->release();
  	if (ret != kIOReturnSuccess) {
-@@ -1664,14 +1667,18 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
+@@ -1720,6 +1723,9 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
  	if (ref == NULL) {
  		ref = findRef((uint32_t)(uintptr_t)id, &index);
  	}
 +	if (ref != NULL) {
-+		OSIncrementAtomic((volatile SInt32 *)&sweet_surface_nrel);
++	    OSIncrementAtomic((volatile SInt32 *)&sweet_surface_nrel);
 +	}
  	if (ref != NULL && --ref->count == 0) {
  		/*
  		 * The pixels are unmapped now; the state page (read-only) stays mapped a while.
- 		 * In backboardd another IOSurface object can still hold a framework client of
- 		 * the same surface after this one is released (CoreAnimation and the GL layer
- 		 * both keep surfaces): reading its seed from an unmapped page crashed
- 		 * backboardd in IOSurfaceClientGetSeed. The last 256 released views keep
- 		 * their page (16 KB each), the oldest goes first.
+@@ -1731,6 +1737,17 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
  		 */
  		OSSafeReleaseNULL(ref->data);
  		sweet_surface_put(ref->surface);
-+		OSSafeReleaseNULL(ref->surface);
++		{
++		    static int rel = -1;
++		    if (rel < 0) {
++		        uint32_t on = 0;
++		        rel = PE_parse_boot_argn("sweetzombierel", &on, sizeof(on)) && on != 0;
++		    }
++		    if (rel) {
++		        /* a zombie keeps only the state page, not the whole surface */
++		        OSSafeReleaseNULL(ref->surface);
++		    }
++		}
+ 		ref->released = true;
+ 		ref->detached = false;
+ 		if (fZombies != NULL && fZombies->setObject(ref)) {
+@@ -1738,6 +1755,25 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
+ 				fZombies->removeObject(0);
+ 			}
+ 		}
++		{
++		    static uint32_t rel_n;
++		    if ((++rel_n & 31) == 0) {
++		        uint64_t pinned = 0;
++		        unsigned int held = 0;
++		        char nm[32];
++		        for (unsigned int z = 0; fZombies != NULL && z < fZombies->getCount(); z++) {
++		            SweetSurfaceRef *zr = (SweetSurfaceRef *)fZombies->getObject(z);
++		            if (zr != NULL && zr->surface != NULL) {
++		                pinned += zr->surface->allocSize;
++		                held++;
++		            }
++		        }
++		        proc_selfname(nm, sizeof(nm));
++		        IOLog("SWEET SURF: %s release #%u refs %u zombies %u holding %u surfaces %llu MB wired %llu MB\n", nm, rel_n,
++		            fRefs->getCount(), fZombies != NULL ? fZombies->getCount() : 0, held,
++		            (unsigned long long)(pinned >> 20), (unsigned long long)(sweet_surface_wired >> 20));
++		    }
++		}
+ 		fRefs->removeObject(index);
+ 	}
+ 	IOLockUnlock(fLock);
