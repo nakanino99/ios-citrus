@@ -17,7 +17,7 @@ index a4e5569..e23b5c5 100644
  	gGPUStat.taking += mach_absolute_time() - began;
  	IOLockUnlock(gGPULock);
 diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
-index 29925ff..a7ba946 100644
+index 29925ff..b27e7e8 100644
 --- a/iokit/Kernel/arm/SweetSurface.cpp
 +++ b/iokit/Kernel/arm/SweetSurface.cpp
 @@ -110,6 +110,7 @@ static IOLock       *sweet_surface_lock;
@@ -60,7 +60,7 @@ index 29925ff..a7ba946 100644
  	if (ref != NULL && --ref->count == 0) {
  		/*
  		 * The pixels are unmapped now; the state page (read-only) stays mapped a while.
-@@ -1731,6 +1737,17 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
+@@ -1731,6 +1737,20 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
  		 */
  		OSSafeReleaseNULL(ref->data);
  		sweet_surface_put(ref->surface);
@@ -68,17 +68,20 @@ index 29925ff..a7ba946 100644
 +		    static int rel = -1;
 +		    if (rel < 0) {
 +		        uint32_t on = 0;
-+		        rel = PE_parse_boot_argn("sweetzombierel", &on, sizeof(on)) && on != 0;
++		        if (!PE_parse_boot_argn("sweetzombierel", &on, sizeof(on))) {
++            on = 0;
++        }
++        rel = (int)on;
 +		    }
-+		    if (rel) {
-+		        /* a zombie keeps only the state page, not the whole surface */
++		    /* sweetzombierel=1: surfaces in kernel memory only; =2: GPU pool surfaces too */
++    if (rel >= 2 || (rel == 1 && !ref->surface->gpuPool)) {
 +		        OSSafeReleaseNULL(ref->surface);
 +		    }
 +		}
  		ref->released = true;
  		ref->detached = false;
  		if (fZombies != NULL && fZombies->setObject(ref)) {
-@@ -1738,6 +1755,25 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
+@@ -1738,6 +1758,25 @@ IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, v
  				fZombies->removeObject(0);
  			}
  		}
