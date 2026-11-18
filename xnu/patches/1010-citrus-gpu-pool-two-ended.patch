@@ -1,0 +1,37 @@
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -227,6 +227,25 @@
+ 	return 0;
+ }
+ 
++/* like range_alloc, but from the end of the highest range: small buffers pile up at the top of the pool, away from the big surfaces */
++static uint64_t
++range_alloc_top(void *table, unsigned *count, uint64_t size)
++{
++	struct r { uint64_t start, size; } *f = (struct r *)table;
++
++	for (unsigned i = *count; i-- > 0;) {
++		if (f[i].size >= size) {
++			uint64_t address = f[i].start + f[i].size - size;
++			f[i].size -= size;
++			if (f[i].size == 0) {
++				memmove(&f[i], &f[i + 1], (--*count - i) * sizeof(f[0]));
++			}
++			return address;
++		}
++	}
++	return 0;
++}
++
+ /*
+  * A descriptor for pool memory. The cache mode goes into the descriptor itself:
+  * for a task other than the kernel, physical memory is mapped through a device
+@@ -270,7 +289,7 @@
+ 		}
+ 		gpu_pool_ready = true;
+ 	}
+-	pa = range_alloc(pool_free, &pool_free_count, size);
++	pa = size < (1ull << 20) ? range_alloc_top(pool_free, &pool_free_count, size) : range_alloc(pool_free, &pool_free_count, size);
+ 	if (pa == 0) {
+ 		if (OSAddAtomic64(1, &pool_fails) < 20) {
+ 			uint64_t tot = 0, big = 0;
