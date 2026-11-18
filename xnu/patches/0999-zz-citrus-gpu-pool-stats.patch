@@ -1,34 +1,53 @@
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
-@@ -168,6 +168,9 @@
+@@ -168,6 +168,20 @@
  static bool gpu_pool_ready;
  static struct { uint64_t start, size; } pool_free[2048];
  static unsigned pool_free_count;
 +/* pool use, for the log: bytes in use, the most there has been, allocations that found no room */
 +static volatile SInt64 pool_used_bytes, pool_peak_bytes, pool_fails, pool_allocs, pool_frees, pool_dbl;
 +static uint64_t pool_logged_peak;
++static SInt64 pool_last_logged;
++static void
++pool_note(SInt64 used)
++{
++	SInt64 d = used - pool_last_logged;
++
++	if (d >= (8ll << 20) || d <= -(8ll << 20)) {
++		pool_last_logged = used;
++		IOLog("TopazGPU: pool now %lld MB, live %lld (allocs %lld, frees %lld)\n", used >> 20, (SInt64)(pool_allocs - pool_frees), (SInt64)pool_allocs, (SInt64)pool_frees);
++	}
++}
  
  static void
  range_free(void *table, unsigned *count, unsigned max, uint64_t address, uint64_t size)
-@@ -258,6 +261,11 @@
+@@ -258,6 +261,18 @@
  	}
  	pa = range_alloc(pool_free, &pool_free_count, size);
  	if (pa == 0) {
 +		if (OSAddAtomic64(1, &pool_fails) < 20) {
-+			IOLog("TopazGPU: pool has no room for %llu KB (in use %llu MB, peak %llu MB of %llu MB)\n",
++			uint64_t tot = 0, big = 0;
++			for (unsigned i = 0; i < pool_free_count; i++) {
++				tot += pool_free[i].size;
++				if (pool_free[i].size > big) {
++					big = pool_free[i].size;
++				}
++			}
++			IOLog("TopazGPU: pool has no room for %llu KB (in use %llu MB, peak %llu MB of %llu MB; free %llu KB in %u ranges, largest %llu KB)\n",
 +			    size >> 10, (uint64_t)pool_used_bytes >> 20, (uint64_t)pool_peak_bytes >> 20,
-+			    (uint64_t)GPU_POOL_SIZE >> 20);
++			    (uint64_t)GPU_POOL_SIZE >> 20, tot >> 10, pool_free_count, big >> 10);
 +		}
  		return 0;
  	}
  	unsigned c = (unsigned)((pa - GPU_POOL_BASE) / GPU_POOL_CHUNK);
-@@ -278,6 +286,19 @@
+@@ -278,6 +286,20 @@
  	if (va != NULL) {
  		*va = gpu_chunk_va[c] + (pa - GPU_POOL_BASE - c * GPU_POOL_CHUNK);
  	}
 +	{
 +		OSAddAtomic64(1, &pool_allocs);
 +		SInt64 now = OSAddAtomic64((SInt64)size, &pool_used_bytes) + (SInt64)size;
++		pool_note(now);
 +
 +		if (now > pool_peak_bytes) {
 +			pool_peak_bytes = now;
@@ -42,7 +61,7 @@
  	return pa;
  }
  
-@@ -295,6 +316,19 @@
+@@ -295,6 +316,20 @@
  	size = (size + GPU_POOL_UNIT - 1) & ~(GPU_POOL_UNIT - 1);
  	if (pa >= GPU_POOL_BASE && pa + size <= GPU_POOL_BASE + GPU_POOL_SIZE) {
 +		for (unsigned i = 0; i < pool_free_count; i++) {
@@ -55,6 +74,7 @@
 +		}
  		range_free(pool_free, &pool_free_count, 2048, pa, size);
 +		SInt64 used = OSAddAtomic64(-(SInt64)size, &pool_used_bytes) - (SInt64)size;
++		pool_note(used);
 +		SInt64 n = OSAddAtomic64(1, &pool_frees) + 1;
 +		if (n <= 8 || (n % 32) == 0) {
 +			IOLog("TopazGPU: pool free #%lld %llu KB: in use %llu MB, allocs %lld\n", n, size >> 10, (uint64_t)used >> 20, (SInt64)pool_allocs);
