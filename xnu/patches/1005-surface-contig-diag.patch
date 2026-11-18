@@ -1,0 +1,66 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index b27e7e8..baff504 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -46,6 +46,11 @@
+ #include <libkern/c++/OSSerialize.h>
+ #include <sys/proc.h>
+ 
++extern "C" {
++void clock_get_uptime(uint64_t *result);
++void absolutetime_to_nanoseconds(uint64_t abstime, uint64_t *result);
++}
++
+ /* topaz GPU (TopazAdreno.cpp): the GPU pool below 4 GiB */
+ extern "C" uint64_t topaz_gpu_pool_alloc(uint64_t size, void **va);
+ extern "C" void topaz_gpu_pool_free(uint64_t pa, uint64_t size);
+@@ -1069,6 +1074,8 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 		 * a command buffer, read back as addresses (SMMU FAR 0x0001ff497b7b11c0: a grey pixel).
+ 		 */
+ 		uint64_t take = s->allocSize + 64ull * s->bytesPerRow;
++		uint64_t tp0;
++		clock_get_uptime(&tp0);
+ 		uint64_t pa = topaz_gpu_pool_alloc(take, &va);
+ 		IOMemoryDescriptor *md = pa != 0 ? topaz_gpu_pool_md(pa, s->allocSize) : NULL;
+ 		if (md != NULL) {
+@@ -1079,7 +1086,17 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 			s->memory = md;
+ 			s->gpuPool = true;
+ 			s->scanoutPhys = pa;
+-			s->mapCache = kIOMapDefaultCache;       /* (the descriptor says write-combined) */
++			s->mapCache = kIOMapDefaultCache;
++			{
++			    uint64_t tp1, tpn;
++			    clock_get_uptime(&tp1);
++			    absolutetime_to_nanoseconds(tp1 - tp0, &tpn);
++			    if (tpn > 5000000) {
++			        char nm[32];
++			        proc_selfname(nm, sizeof(nm));
++			        IOLog("SWEET SURF: %s pool surface %u pages in %llu us\n", nm, (unsigned)(take >> 14), (unsigned long long)(tpn / 1000));
++			    }
++			}
+ 			if (!sweet_surface_publish(s)) {
+ 				ret = kIOReturnNoResources;
+ 			}
+@@ -1151,9 +1168,20 @@ IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
+ 				}
+ 			}
+ 			if (mem == NULL && gpu_low && take <= (16u << 20)) {
+-				mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++			    uint64_t tc0, tc1, tcn;
++			    static uint32_t tc_fail;
++			    clock_get_uptime(&tc0);
++			    mem = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+ 				    kIODirectionInOut | kIOMemoryKernelUserShared | kIOMemoryPhysicallyContiguous, take,
+ 				    0x0000000FFFFFC000ull);
++			    clock_get_uptime(&tc1);
++			    absolutetime_to_nanoseconds(tc1 - tc0, &tcn);
++			    if (tcn > 3000000 || (mem == NULL && ++tc_fail <= 300)) {
++			        char nm[32];
++			        proc_selfname(nm, sizeof(nm));
++			        IOLog("SWEET SURF: %s contiguous %u pages %s in %llu us\n", nm, (unsigned)(take >> 14),
++			            mem != NULL ? "ok" : "failed", (unsigned long long)(tcn / 1000));
++			    }
+ 			}
+ 			if (mem == NULL) {
+ 				mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
