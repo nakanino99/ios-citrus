@@ -1,0 +1,123 @@
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -437,71 +437,60 @@
+ /* ---------------------------------------------------------------- gpu_cc_pll0 (topaz-woa TopazGpuW v0.43) */
+ 
+ /*
+- * Zonda PLL at GPU CC + 0, sequence from the stock khaje kernel (gpucc-khaje.c, clk-alpha-pll.c):
+- * f = 19.2 MHz * (L + alpha / 2^16) at the stock OPPs. The GX voltage corner is not voted (RPM):
+- * high rates run on whatever the bootloader left and may hang (gpu_mhz is opt-in).
++ * Replaces the whole Zonda block of patch 0922 (ZP_* defines, zonda_la, gpu_pll_start).
++ *
++ * gpu_cc_pll0 on SM6115 is a clk_alpha_pll of type DEFAULT (gpucc-sm6115.c), not Zonda.
++ * gfx3d (0x101c) takes PLL0_OUT_AUX2 as parent 2, post divider 1, and the RCG divides by 2:
++ *   core MHz = PLL0 MHz / 2, PLL0 VCO range 1000-2000 MHz (vco_val 0), boot value 1200 MHz.
++ * PLL MHz = 19.2 * (L + alpha / 2^40), alpha = (alpha_hi << 32) | alpha.
+  */
+-#define ZP_MODE        0x00
+-#define ZP_L           0x04
+-#define ZP_ALPHA       0x08
+-#define ZP_USER        0x0c
+-#define ZP_CFG         0x10
+-#define ZP_CFG_U       0x14
+-#define ZP_CFG_U1      0x18
+-#define ZP_OPMODE      0x28
+-#define ZP_BYPASSNL    (1u << 1)
+-#define ZP_RESET_N     (1u << 2)
+-#define ZP_OUTCTRL     (1u << 0)
+-#define ZP_LOCK        (1u << 31)
++#define AP_MODE      0x00
++#define AP_L         0x04
++#define AP_ALPHA     0x08
++#define AP_ALPHA_U   0x0c
++#define AP_USER      0x10
++#define AP_CONFIG    0x18
++#define AP_OUTCTRL   (1u << 0)
++#define AP_BYPASSNL  (1u << 1)
++#define AP_RESET_N   (1u << 2)
++#define AP_LOCK      (1u << 31)
+ 
+ static bool
+-zonda_la(uint32_t mhz, uint32_t *l, uint32_t *a)
++gpu_pll_start(uint32_t mhz)
+ {
+-	static const uint32_t t[][3] = {
+-		{ 320, 16, 0xAAAB }, { 465, 24, 0x3800 }, { 600, 31, 0x4000 }, { 745, 38, 0xCD55 }, { 820, 42, 0xB555 },
+-		{ 900, 46, 0xE000 }, { 950, 49, 0x7AAB },
++	static const uint32_t t[][4] = {        /* core MHz, L, alpha_hi, alpha (PLL = 2 x core) */
++		{ 745, 77, 0x9a, 0xaaaaaaab }, { 820, 85, 0x6a, 0xaaaaaaab },
++		{ 900, 93, 0xc0, 0x00000000 }, { 950, 98, 0xf5, 0x55555555 },
+ 	};
++	const uint32_t *e = NULL;
++
+ 	for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+ 		if (t[i][0] == mhz) {
+-			*l = t[i][1];
+-			*a = t[i][2];
+-			return true;
++			e = t[i];
+ 		}
+ 	}
+-	return false;
+-}
+-
+-static bool
+-gpu_pll_start(uint32_t mhz)
+-{
+-	uint32_t l, a;
+-
+-	if (!zonda_la(mhz, &l, &a)) {
+-		IOLog("TopazGPU: gpu_mhz=%u is not a stock OPP (320 465 600 745 820 900 950)\n", mhz);
++	if (!e) {
++		IOLog("TopazGPU: gpu_mhz=%u has no PLL0 entry (745 820 900 950)\n", mhz);
+ 		return false;
+ 	}
+-	rmw(gpucc, ZP_MODE, ZP_OUTCTRL, 0);
+-	wr(gpucc, ZP_OPMODE, 0);
+-	wr(gpucc, ZP_L, l);
+-	wr(gpucc, ZP_ALPHA, a);
+-	wr(gpucc, ZP_CFG, 0x08200800);
+-	wr(gpucc, ZP_CFG_U, 0x05022001);
+-	wr(gpucc, ZP_CFG_U1, 0x00000010);
+-	wr(gpucc, ZP_USER, 0x01000101);
+-	rmw(gpucc, ZP_MODE, ZP_BYPASSNL, 0);
+-	rmw(gpucc, ZP_MODE, 0, ZP_RESET_N);
+-	rmw(gpucc, ZP_MODE, 0, ZP_BYPASSNL);
+-	IODelay(1);
+-	rmw(gpucc, ZP_MODE, 0, ZP_RESET_N);
+-	wr(gpucc, ZP_OPMODE, 1);
+-	if (!poll(gpucc, ZP_MODE, ZP_LOCK, ZP_LOCK, 1000)) {
+-		IOLog("TopazGPU: gpu_cc_pll0: no lock at %u MHz (mode %08x)\n", mhz, rd(gpucc, ZP_MODE));
++	rmw(gpucc, AP_MODE, AP_OUTCTRL | AP_BYPASSNL | AP_RESET_N, 0);   /* off, bypass, in reset */
++	wr(gpucc, AP_L, e[1]);
++	wr(gpucc, AP_ALPHA, e[3]);
++	wr(gpucc, AP_ALPHA_U, e[2]);
++	wr(gpucc, AP_CONFIG, 0x4001055b);
++	/* USER_CTL: vco_val 0 (bits 21:20), alpha_en (24), post div 1 (11:8), main/aux/aux2 outputs (2:0) */
++	rmw(gpucc, AP_USER, (3u << 20) | (1u << 24) | 0xF07, (1u << 24) | 0x7);
++	rmw(gpucc, AP_MODE, 0, AP_BYPASSNL);                             /* leave bypass */
++	IODelay(5);                                                     /* 5 us before releasing reset */
++	rmw(gpucc, AP_MODE, 0, AP_RESET_N);
++	if (!poll(gpucc, AP_MODE, AP_LOCK, AP_LOCK, 1000)) {
++		IOLog("TopazGPU: gpu_cc_pll0: no lock at %u MHz (mode %08x)\n", mhz, rd(gpucc, AP_MODE));
+ 		return false;
+ 	}
+-	rmw(gpucc, ZP_USER, 0, 0xF);
+-	rmw(gpucc, ZP_MODE, 0, ZP_OUTCTRL);
++	rmw(gpucc, AP_USER, 0, 0x7);
++	rmw(gpucc, AP_MODE, 0, AP_OUTCTRL);
+ 	IODelay(100);
+-	IOLog("TopazGPU: gpu_cc_pll0 locked at %u MHz (l %u alpha %04x)\n", mhz, l, a);
++	IOLog("TopazGPU: gpu_cc_pll0 locked at %u MHz (l %u alpha %02x%08x)\n", mhz, e[1], e[2], e[3]);
+ 	return true;
+ }
+ 
+@@ -588,7 +577,7 @@
+ 	}
+ 	/* gfx3d: 300/600 MHz from GPLL0 (/2, /1), other stock OPPs from gpu_cc_pll0 (the GX corner is not voted) */
+ 	if (core_mhz != 300 && core_mhz != 600 && gpu_pll_start(core_mhz)) {
+-		if (!rcg_set(0x101c, 1, 1)) {                   /* parent 1 = GPU_CC_PLL0_OUT_MAIN */
++		if (!rcg_set(0x101c, 2, 2)) {                   /* parent 2 = GPU_CC_PLL0_OUT_AUX2, /2 */
+ 			return false;
+ 		}
+ 	} else {
