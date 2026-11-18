@@ -1,0 +1,174 @@
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -1121,6 +1121,108 @@
+ 	__asm__ volatile ("dsb sy" ::: "memory");
+ }
+ 
++/* ---- gpu_time=1: GPU execution time per submission. The CP copies the always-on counter into mem
++ * before the IBs and (after CP_WAIT_FOR_IDLE) after them. Numbers from Linux's adreno_pm4.xml.h /
++ * a6xx.xml.h: CP_REG_TO_MEM 62, CP_WAIT_FOR_IDLE 38, CP_ALWAYS_ON_COUNTER_LO 0x980,
++ * CP_REG_TO_MEM_0 REG mask 0xffff, CNT shift 19, 64B 0x40000000. Counter clock 19.2 MHz (assumed). ---- */
++#define GT_OP_REG_TO_MEM        0x3e
++#define GT_OP_WAIT_IDLE         0x26
++#define GT_REG_TO_MEM_COUNTER   (0x980u | (2u << 19) | 0x40000000u)
++#define GT_SLOTS                128     /* one 64-byte cache line per slot: [0..1] start, [2..3] end */
++#define GT_OFF                  0x400   /* inside mem; fence is at mem+0 */
++#define GT_STEP                 64
++#define GT_WORDS                9       /* start 4 + wait-idle 1 + end 4 */
++
++static uint32_t gpu_time;
++static bool gt_ready;
++static uint32_t gt_seen;
++static uint64_t gt_us;
++static uint32_t gt_n, gt_by[7];
++
++static volatile uint32_t *
++gt_slot(uint32_t fence)
++{
++	return (volatile uint32_t *)((uintptr_t)mem.va + GT_OFF + (fence % GT_SLOTS) * GT_STEP);
++}
++
++/* hw_lock held. Folds the finished submissions into the totals; returns the fence done so far. */
++static uint32_t
++gt_collect(void)
++{
++	if (!gt_ready || mem.va == NULL) {
++		return 0;
++	}
++	sweet_dcache_flush((vm_offset_t)mem.va, 64);
++	uint32_t done = *(volatile uint32_t *)mem.va;
++
++	if ((int32_t)(done - gt_seen) > GT_SLOTS) {
++		gt_seen = done - GT_SLOTS;
++	}
++	while ((int32_t)(done - gt_seen) > 0) {
++		uint32_t f = gt_seen + 1;
++		volatile uint32_t *s = gt_slot(f);
++
++		sweet_dcache_flush((vm_offset_t)s, GT_STEP);
++		uint64_t a = s[0] | ((uint64_t)s[1] << 32);
++		uint64_t b = s[2] | ((uint64_t)s[3] << 32);
++
++		if (a != 0 && b == 0) {
++			break;  /* the end write is not visible yet: try again later */
++		}
++		if (a != 0 && b >= a) {
++			uint64_t us = (b - a) * 10 / 192;
++
++			gt_us += us;
++			gt_n++;
++			gt_by[us < 100 ? 0 : us < 250 ? 1 : us < 500 ? 2 : us < 1000 ? 3 : us < 2000 ? 4 : us < 4000 ? 5 : 6]++;
++		}
++		if (a != 0 || b != 0) {
++			s[0] = s[1] = s[2] = s[3] = 0;
++			sweet_dcache_flush((vm_offset_t)s, GT_STEP);
++		}
++		gt_seen = f;
++	}
++	return done;
++}
++
++/* hw_lock held: should this submission be timed? */
++static bool
++gt_prepare(uint32_t fence)
++{
++	if (!gpu_time || mem.va == NULL) {
++		return false;
++	}
++	if (!gt_ready) {
++		if (PAGE_SIZE < GT_OFF + GT_SLOTS * GT_STEP) {
++			gpu_time = 0;
++			IOLog("TopazGPU: gpu_time: mem page too small, off\n");
++			return false;
++		}
++		bzero((void *)((uintptr_t)mem.va + GT_OFF), GT_SLOTS * GT_STEP);
++		sweet_dcache_flush((vm_offset_t)mem.va + GT_OFF, GT_SLOTS * GT_STEP);
++		gt_seen = fence - 1;
++		gt_ready = true;
++		IOLog("TopazGPU: gpu_time on (counter 0x980, %d slots)\n", GT_SLOTS);
++	}
++	uint32_t done = gt_collect();
++
++	return (int32_t)(fence - done) < GT_SLOTS;
++}
++
++static void
++gt_emit(uint32_t fence, bool end)
++{
++	uint64_t a = mem.iova + GT_OFF + (uint64_t)(fence % GT_SLOTS) * GT_STEP + (end ? 8 : 0);
++
++	if (end) {
++		emit(pkt7(GT_OP_WAIT_IDLE, 0));
++	}
++	emit(pkt7(GT_OP_REG_TO_MEM, 3));
++	emit(GT_REG_TO_MEM_COUNTER);
++	emit((uint32_t)a);
++	emit((uint32_t)(a >> 32));
++}
++
+ bool
+ redwood_gpu_done(uint32_t fence)
+ {
+@@ -1143,13 +1245,25 @@
+ 	*microseconds = 0;
+ 	*submissions = 0;
+ 	bzero(by, 7 * sizeof(uint32_t));
++	if (hw_lock == NULL || !gpu_time) {
++		return;
++	}
++	IOLockLock(hw_lock);
++	gt_collect();
++	*microseconds = gt_us;      /* since the last call */
++	*submissions = gt_n;
++	memcpy(by, gt_by, sizeof(gt_by));
++	gt_us = 0;
++	gt_n = 0;
++	bzero(gt_by, sizeof(gt_by));
++	IOLockUnlock(hw_lock);
+ }
+ 
+ /* IBs then CACHE_FLUSH_TS writing the submission's number to mem+0 (TopazGpuW HwSubmit). 0: ring full. */
+ uint32_t
+ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count)
+ {
+-	uint32_t need = 4 * count + 5;
++	uint32_t need = 4 * count + 5 + (gpu_time ? GT_WORDS : 0);
+ 
+ 	if (!ready) {
+ 		return 0;
+@@ -1162,16 +1276,24 @@
+ 		IOLockUnlock(hw_lock);
+ 		return 0;
+ 	}
++	if (++seqno == 0) {
++		seqno = 1;
++	}
++	uint32_t fence = seqno;
++	bool timed = gt_prepare(fence);
++
++	if (timed) {
++		gt_emit(fence, false);
++	}
+ 	for (uint32_t i = 0; i < count; i++) {
+ 		emit(pkt7(CP_INDIRECT_BUFFER, 3));
+ 		emit((uint32_t)addresses[i]);
+ 		emit((uint32_t)(addresses[i] >> 32));
+ 		emit(words[i]);
+ 	}
+-	if (++seqno == 0) {
+-		seqno = 1;
++	if (timed) {
++		gt_emit(fence, true);
+ 	}
+-	uint32_t fence = seqno;
+ 	emit(pkt7(CP_EVENT_WRITE, 4));
+ 	emit(CACHE_FLUSH_TS);
+ 	emit((uint32_t)mem.iova);
+@@ -1244,6 +1366,7 @@
+ 	}
+ 	(void)PE_parse_boot_argn("gpu_identity", &gpu_identity, sizeof(gpu_identity));
+ 	(void)PE_parse_boot_argn("gpu_midmem", &gpu_midmem, sizeof(gpu_midmem));
++	(void)PE_parse_boot_argn("gpu_time", &gpu_time, sizeof(gpu_time));
+ 	if (PE_parse_boot_argn("gpu_mhz", &mhz, sizeof(mhz)) && mhz >= 300) {
+ 		core_mhz = mhz;                                 /* (checked against the OPP table in power_up) */
+ 	}
