@@ -5,7 +5,7 @@
  static struct { uint64_t start, size; } pool_free[2048];
  static unsigned pool_free_count;
 +/* pool use, for the log: bytes in use, the most there has been, allocations that found no room */
-+static volatile SInt64 pool_used_bytes, pool_peak_bytes, pool_fails;
++static volatile SInt64 pool_used_bytes, pool_peak_bytes, pool_fails, pool_allocs, pool_frees, pool_dbl;
 +static uint64_t pool_logged_peak;
  
  static void
@@ -22,11 +22,12 @@
  		return 0;
  	}
  	unsigned c = (unsigned)((pa - GPU_POOL_BASE) / GPU_POOL_CHUNK);
-@@ -278,6 +286,18 @@
+@@ -278,6 +286,19 @@
  	if (va != NULL) {
  		*va = gpu_chunk_va[c] + (pa - GPU_POOL_BASE - c * GPU_POOL_CHUNK);
  	}
 +	{
++		OSAddAtomic64(1, &pool_allocs);
 +		SInt64 now = OSAddAtomic64((SInt64)size, &pool_used_bytes) + (SInt64)size;
 +
 +		if (now > pool_peak_bytes) {
@@ -41,11 +42,23 @@
  	return pa;
  }
  
-@@ -295,6 +315,7 @@
+@@ -295,6 +316,19 @@
  	size = (size + GPU_POOL_UNIT - 1) & ~(GPU_POOL_UNIT - 1);
  	if (pa >= GPU_POOL_BASE && pa + size <= GPU_POOL_BASE + GPU_POOL_SIZE) {
++		for (unsigned i = 0; i < pool_free_count; i++) {
++			if (pa < pool_free[i].start + pool_free[i].size && pool_free[i].start < pa + size) {
++				if (OSAddAtomic64(1, &pool_dbl) < 20) {
++					IOLog("TopazGPU: pool double free %#llx %llu KB, overlaps free %#llx %llu KB\n", pa, size >> 10, pool_free[i].start, pool_free[i].size >> 10);
++				}
++				return;
++			}
++		}
  		range_free(pool_free, &pool_free_count, 2048, pa, size);
-+		OSAddAtomic64(-(SInt64)size, &pool_used_bytes);
++		SInt64 used = OSAddAtomic64(-(SInt64)size, &pool_used_bytes) - (SInt64)size;
++		SInt64 n = OSAddAtomic64(1, &pool_frees) + 1;
++		if (n <= 8 || (n % 32) == 0) {
++			IOLog("TopazGPU: pool free #%lld %llu KB: in use %llu MB, allocs %lld\n", n, size >> 10, (uint64_t)used >> 20, (SInt64)pool_allocs);
++		}
  	}
  }
  /* boot-arg gpu_identity (default 1): the SMMU passes addresses through (TopazGpuW G1), GPU VA = PA */
