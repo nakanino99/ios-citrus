@@ -1,11 +1,15 @@
-// gpucompute: the smallest compute dispatches, one step per run. No gpu_recover in this kernel: a hang stays a hang
-// until a reboot, so run the steps in order and read each result before the next.
+// gpucompute: the smallest compute dispatches, one step per run. No gpu_recover in this kernel: a hang stays a
+// hang until a reboot, so run the steps in order and read each result before the next.
 //   1: end_only, 1 group, without the dispatch's own tail
 //   2: end_only, 1 group, the whole sequence (tail on)
 //   3: fill_id, 16 groups of 64, c = 0x1234: every word checked
 //   4: the controls of probe.cpp 5c: another c; 8 groups (half the buffer stays canary); end_only over 16 groups
 //   5: fill_id_air (fixture made offline from AIR by ir3_compiler), 16 groups of 64, c from a constant buffer
+//   6: chain220_air alone (134 units): reboot first and run this as the boot's first shader (probe.cpp 5a0)
+//   7: probe.cpp 5d2: chain160_air, chain220_air, long_chain_air in turn (A610 preloads 64 units, the rest is fetched)
+//   8: probe.cpp 5a00: the same kernels with the preload cut to 64 and to 120 units
 // exit: 0 all ok, 6 a check failed, 7 hang (alarm), 64 usage, 2 no GPU, 3 no queue/buffer
+#include <algorithm>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -14,9 +18,13 @@
 #include <unistd.h>
 #include <vector>
 
+#include "fixtures/chain160_air.hpp"
+#include "fixtures/chain220_air.hpp"
 #include "fixtures/end_only.hpp"
 #include "fixtures/fill_id.hpp"
 #include "fixtures/fill_id_air.hpp"
+#include "fixtures/long_chain_air.hpp"
+#include "hakios-metal/a6xx.hpp"
 #include "hakios-metal/command.hpp"
 #include "hakios-metal/compute.hpp"
 
@@ -48,6 +56,18 @@ static uint32_t canaryFor(uint32_t words, uint32_t c) {
         if (!clash) return canary;
         canary += 0x01010101u;
     }
+}
+
+// probe.cpp: STEPS steps of v = rotl((v ^ X) * M, R) from gid ^ c, the processor's answer for the chain kernels
+static uint32_t long_chain_reference(uint32_t gid, uint32_t c, unsigned steps) {
+    uint32_t v = gid ^ c;
+    for (unsigned i = 0; i < steps; i++) {
+        const uint32_t x = 0x9E3779B1u * (i + 1);
+        const uint32_t m = x | 1, r = 5 + i % 23;
+        const uint32_t b = (v ^ (x ^ 0x5BD1E995u)) * m;
+        v = (b << r) | (b >> (32 - r));
+    }
+    return v;
 }
 
 struct Readback {
@@ -120,11 +140,50 @@ static std::string statusLine(const Run& r, Gpu& gpu, uint64_t faults0) {
     return t;
 }
 
+// one chain kernel over 16 groups of 64: every word must be the processor's chain of its own gid; with checkTwin the
+// chain one step short must disagree almost everywhere (it says the last steps ran), as in probe.cpp 5d2
+static void runChain(CommandQueue& queue, Gpu& gpu, uint64_t faults0, Buffer& out, Buffer& cbuf, uint32_t words,
+                     uint32_t c, const Kernel& k, unsigned steps, const char* name, uint32_t preloadCap, bool checkTwin) {
+    const uint32_t local[3] = {64, 1, 1};
+    compute::Options o;
+    o.preloadCap = preloadCap;
+    static_cast<uint32_t*>(cbuf.contents())[0] = c;
+    auto* w = static_cast<uint32_t*>(out.contents());
+    const uint32_t canary = canaryFor(words, c);
+    for (uint32_t i = 0; i < words; i++) w[i] = canary;
+    std::printf("gpucompute: start %s (%u units, %u preloaded by default), preloadCap %u, 16 groups of 64\n", name,
+                unsigned(k.instrlen), unsigned(std::min<uint32_t>(k.instrlen, a6xx::kInstrCacheSize)),
+                unsigned(preloadCap));
+    std::fflush(stdout);
+    Run r = runKernel(queue, k, 16, local, {Binding{&out, 0}, Binding{&cbuf, 0}}, nullptr, o);
+    const uint32_t* got = static_cast<const uint32_t*>(out.contents());
+    uint32_t right = 0, shortTwin = 0, firstWrong = words;
+    for (uint32_t g = 0; g < words; g++) {
+        if (got[g] == long_chain_reference(g, c, steps)) right++;
+        else if (firstWrong == words) firstWrong = g;
+        shortTwin += got[g] == long_chain_reference(g, c, steps - 1);
+    }
+    std::string where;
+    if (firstWrong != words) {
+        char text[120];
+        std::snprintf(text, sizeof text, " (first wrong at %u: got %08x, want %08x)", firstWrong, got[firstWrong],
+                      long_chain_reference(firstWrong, c, steps));
+        where = text;
+    }
+    char text[96];
+    std::snprintf(text, sizeof text, " (word 0: got %08x, want %08x)", got[0], long_chain_reference(0, c, steps));
+    const bool twinOk = !checkTwin || shortTwin < words / 16;
+    report(completed(r) && right == words && twinOk,
+           std::string("dispatch of ") + name + ": " + std::to_string(right) + " of " + std::to_string(words) +
+               " words the " + std::to_string(steps) + "-step chain, " + std::to_string(shortTwin) +
+               " the one a step short" + where + text + statusLine(r, gpu, faults0));
+}
+
 int main(int argc, char** argv) {
     const int step = argc > 1 ? std::atoi(argv[1]) : 0;
-    if (step < 1 || step > 5) {
-        std::printf("gpucompute: usage: gpucompute 1|2|3|4|5   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
-                    "4: controls, 5: fill_id_air)\n");
+    if (step < 1 || step > 8) {
+        std::printf("gpucompute: usage: gpucompute 1..8   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
+                    "4: controls, 5: fill_id_air, 6: chain220 alone, 7: chains, 8: preload cuts)\n");
         return 64;
     }
     std::string why;
@@ -197,7 +256,7 @@ int main(int argc, char** argv) {
                    "step 4c, control, end_only over 16 groups: " + std::to_string(b.beyondCanary) + " of " +
                        std::to_string(words) + " words canary" + statusLine(r, gpu, faults0));
         }
-    } else {
+    } else if (step == 5) {
         const uint32_t local[3] = {64, 1, 1};
         static_cast<uint32_t*>(cbuf->contents())[0] = c;
         prefill(canary);
@@ -207,6 +266,17 @@ int main(int argc, char** argv) {
         report(completed(r) && b.right == words,
                "step 5: fill_id_air (offline AIR -> NIR -> ir3 fixture), 16 groups of 64, c from a constant buffer: " +
                    describe(b, words, c, 0) + statusLine(r, gpu, faults0));
+    } else if (step == 6) {
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 0, false);
+    } else if (step == 7) {
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain160_air, 160, "chain160_air", 0, true);
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 0, true);
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::long_chain_air, 700, "long_chain_air", 0, true);
+    } else {
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain160_air, 160, "chain160_air", 64, false);
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 64, false);
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 120, false);
+        runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::long_chain_air, 700, "long_chain_air", 64, false);
     }
     return failures ? 6 : 0;
 }
