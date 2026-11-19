@@ -28,8 +28,14 @@ jobs:
             -std=c++17 -O2 -Wall -Wextra -Wno-invalid-constexpr -Iinclude -o out/gpuping \
             gpuping.cpp gpu.cpp iokit_transport.cpp \
             -framework IOKit -framework CoreFoundation
+          xcrun --sdk iphoneos clang++ -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -O2 -Wall -Wextra -Wno-invalid-constexpr -I. -Iinclude -o out/gpucompute \
+            gpucompute.cpp gpu.cpp pm4.cpp command.cpp compute.cpp texture.cpp render.cpp link.cpp \
+            compiler.cpp metallib.cpp iokit_transport.cpp \
+            -framework IOKit -framework CoreFoundation -framework IOSurface
           codesign -f -s - out/gpuinfo
           codesign -f -s - out/gpuping
+          codesign -f -s - out/gpucompute
           otool -L out/gpuping
           ls -lh out/
 
@@ -39,4 +45,5 @@ jobs:
           path: |
             userland/hakios-metal-lite/out/gpuinfo
             userland/hakios-metal-lite/out/gpuping
+            userland/hakios-metal-lite/out/gpucompute
           retention-days: 30
