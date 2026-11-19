@@ -10,6 +10,7 @@
 //   8: probe.cpp 5a00: the same kernels with the preload cut to 64 and to 120 units
 //   9: probe.cpp 7a: tex_fill_air writes an R32Uint 64x32 image (stib.b.typed.2d at IBO slot 0), then two controls
 //  10: probe.cpp 7a: row padding (48x20) and the four-lane RGBA32Uint format
+//  11: probe.cpp 7b: tex_copy_air reads a texture through the texture table (isaml t#1) and writes it to an image
 // exit: 0 all ok, 6 a check failed, 7 hang (alarm), 64 usage, 2 no GPU, 3 no queue/buffer
 #include <algorithm>
 #include <csignal>
@@ -27,6 +28,7 @@
 #include "fixtures/fill_id.hpp"
 #include "fixtures/fill_id_air.hpp"
 #include "fixtures/long_chain_air.hpp"
+#include "fixtures/tex_copy_air.hpp"
 #include "fixtures/tex_fill_air.hpp"
 #include "hakios-metal/a6xx.hpp"
 #include "hakios-metal/command.hpp"
@@ -354,11 +356,76 @@ static void texFill(CommandQueue& queue, Gpu& gpu, uint64_t faults0, Buffer& cbu
     reportPadding(label, rb);
 }
 
+// probe.cpp 7b: tex_copy. IN (texture index 1, read through the texture table by isaml t#1) is filled through
+// Texture::replace with a pattern injective over the pixels and unlike tex_fill's words; OUT (texture index 0, the
+// image at IBO slot 0) is canary; OUT must come out equal to IN, pixel by pixel, and IN untouched.
+static void texCopy(CommandQueue& queue, Gpu& gpu, uint64_t faults0, uint32_t W, uint32_t H, const uint32_t local[3],
+                    uint32_t groupsX, uint32_t groupsY, const std::string& label) {
+    std::printf("gpucompute: start %s\n", label.c_str());
+    std::fflush(stdout);
+    std::string why;
+    TextureDesc din;
+    din.format = PixelFormat::kR32Uint;
+    din.width = W;
+    din.height = H;
+    din.usage = kTextureUsageRead;
+    TextureDesc dout = din;
+    dout.usage = kTextureUsageWrite;
+    auto in = Texture::make(gpu, din, &why);
+    auto out = in ? Texture::make(gpu, dout, &why) : nullptr;
+    if (in == nullptr || out == nullptr) {
+        report(false, label + ": two " + std::to_string(W) + "x" + std::to_string(H) + " R32Uint textures: " + why);
+        return;
+    }
+    // 0x01000193 is odd (a bijection on 32-bit words), the xor keeps the words apart from tex_fill's
+    auto inWord = [=](uint32_t x, uint32_t y) -> uint32_t { return ((y * W + x) * 0x01000193u) ^ 0x6a09e667u; };
+    std::vector<uint32_t> host(size_t(W) * H);
+    for (uint32_t y = 0; y < H; y++)
+        for (uint32_t x = 0; x < W; x++) host[size_t(y) * W + x] = inWord(x, y);
+    const uint32_t canary = texCanary([&](uint32_t v) {
+        for (uint32_t w : host)
+            if (w == v) return true;
+        return false;
+    });
+    fillBo(*in, canary ^ 0xffffffffu);   // in's own padding: something else, so a read of it would show
+    fillBo(*out, canary);
+    std::string whyReplace;
+    if (!in->replace(0, 0, W, H, host.data(), uint64_t(W) * 4, &whyReplace)) {
+        report(false, label + ": Texture::replace of the input: " + whyReplace);
+        return;
+    }
+    Bindings b;
+    b.textures = {out.get(), in.get()};   // [[texture(0)]] = out (the image), [[texture(1)]] = in (sampled)
+    const uint32_t groups[3] = {groupsX, groupsY, 1};
+    const uint32_t gridW = groupsX * local[0], gridH = groupsY * local[1];
+    compute::Options o;
+    Run r;
+    r.cb = queue.commandBuffer();
+    r.encoded = r.cb->dispatch(kernels::tex_copy_air, groups, local, b, nullptr, o);
+    if (r.encoded) {
+        alarm(20);
+        r.cb->commit();
+        r.cb->waitUntilCompleted();
+        alarm(0);
+    }
+    PixelRule rule{[=](uint32_t x, uint32_t y) { return x < gridW && y < gridH; },
+                   [=](uint32_t x, uint32_t y, uint32_t) { return inWord(x, y); }};
+    TexReadback rb = compareTexture(*out, rule, canary);
+    report(completed(r) && rb.right == rb.covered && rb.covered > 0 && rb.uncoveredCanary == rb.uncovered,
+           label + ": " + describeTexture(rb, "equal to the input") + statusLine(r, gpu, faults0));
+    reportPadding(label, rb);
+    // the input is read only: every pixel still the pattern (its padding is not checked: nothing wrote it but us)
+    PixelRule all{[](uint32_t, uint32_t) { return true; }, [=](uint32_t x, uint32_t y, uint32_t) { return inWord(x, y); }};
+    TexReadback rin = compareTexture(*in, all, canary);
+    report(rin.right == rin.covered, label + ": the input afterwards: " + std::to_string(rin.right) + " of " +
+                                         std::to_string(rin.covered) + " pixels still the pattern");
+}
+
 int main(int argc, char** argv) {
     const int step = argc > 1 ? std::atoi(argv[1]) : 0;
-    if (step < 1 || step > 10) {
-        std::printf("gpucompute: usage: gpucompute 1..10   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
-                    "4: controls, 5: fill_id_air, 6: chain220 alone, 7: chains, 8: preload cuts, 9-10: tex_fill)\n");
+    if (step < 1 || step > 11) {
+        std::printf("gpucompute: usage: gpucompute 1..11   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
+                    "4: controls, 5: fill_id_air, 6: chain220 alone, 7: chains, 8: preload cuts, 9-10: tex_fill, 11: tex_copy)\n");
         return 64;
     }
     std::string why;
@@ -452,7 +519,7 @@ int main(int argc, char** argv) {
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 64, false);
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 120, false);
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::long_chain_air, 700, "long_chain_air", 64, false);
-    } else {
+    } else if (step <= 10) {
         const uint32_t local88[3] = {8, 8, 1}, local84[3] = {8, 4, 1};
         const uint32_t c1 = 0x5678, c2 = 0x6789;
         const Kernel& k = kernels::tex_fill_air;
@@ -470,6 +537,27 @@ int main(int argc, char** argv) {
                     "tex_fill RGBA32Uint 64x32, (8,4,1) groups of (8,8,1), all four lanes");
             texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kRGBA32Uint, "RGBA32Uint", 48, 20, local84, 6, 5, c1,
                     "tex_fill RGBA32Uint 48x20, (6,5,1) groups of (8,4,1), 768-byte rows at a pitch of 1024");
+        }
+    } else {
+        const uint32_t local88[3] = {8, 8, 1}, local84[3] = {8, 4, 1};
+        texCopy(*queue, gpu, faults0, 64, 32, local88, 8, 4,
+                "tex_copy R32Uint 64x32, in at texture 1 (isaml), out at texture 0 (IBO slot 0), (8,4,1) groups of (8,8,1)");
+        texCopy(*queue, gpu, faults0, 64, 32, local88, 4, 4, "control, tex_copy R32Uint 64x32 over the left half, (4,4,1) groups");
+        texCopy(*queue, gpu, faults0, 48, 20, local84, 6, 5,
+                "tex_copy R32Uint 48x20, (6,5,1) groups of (8,4,1), 192-byte rows at a pitch of 256");
+        {
+            // and Texture::replace refuses a region past the edge, by name
+            TextureDesc d;
+            d.format = PixelFormat::kR32Uint;
+            d.width = 8;
+            d.height = 8;
+            auto tx = Texture::make(gpu, d, &why);
+            uint32_t eight[8] = {};
+            std::string whyReplace;
+            bool accepted = tx && tx->replace(7, 0, 2, 1, eight, 32, &whyReplace);
+            report(tx && !accepted && !whyReplace.empty(),
+                   std::string("control, Texture::replace of 2 pixels starting at the last column of 8x8: ") +
+                       (accepted ? "ACCEPTED a region past the width" : "refused: " + whyReplace));
         }
     }
     return failures ? 6 : 0;
