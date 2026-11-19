@@ -23,7 +23,7 @@ int main() {
         {"GPU_ID", kParamGpuId, true, a6xx::kGpuId},
         {"GMEM_SIZE", kParamGmemSize, true, a6xx::kGmemBytes},
         {"MAX_FREQ", kParamMaxFreq, false, 0},
-        {"GMEM_BASE", kParamGmemBase, false, 0},
+        {"GMEM_BASE", kParamGmemBase, true, a6xx::kGmemBase},
         {"PRIORITIES", kParamPriorities, false, 0},
         {"FAULTS", kParamFaults, true, 0},
         {"HIGHEST_BANK_BIT", kParamHighestBankBit, true, 13},

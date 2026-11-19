@@ -1416,6 +1416,7 @@ inline constexpr uint32_t kSysmemPerCcuColorCacheSize = 0x2000; /* A610, was 0x1
 inline constexpr uint32_t kGmemBytes = 0x21000; /* A610, was 512 * 1024 */                // not-in-headers: not in Mesa's table (the kernel reports the GMEM size to Mesa); 0x21000 is the A610's, from RedwoodGPU
 inline constexpr uint32_t kGmemCcuColorCacheFraction = 2; /* A610, was 4 */          // not-in-headers: freedreno_devices.py a6xx_gen1_low gmem_ccu_color_cache_fraction HALF (turnip divides by 1 << it; a6xx_base: QUARTER)
 inline constexpr uint32_t kTileAlignW = 32, kTileAlignH = 16;      // not-in-headers: freedreno_devices.py GPUId(610) tile_align_w/h
+inline constexpr uint32_t kGmemBase = 0x100000;   // A610: the kernel's GMEM_BASE (RedwoodGPU answers it; Linux answers 0x100000 outside the A650 family, where the 7c+ this was written for answers 0)
 inline constexpr uint32_t kGmemAlignW = 16, kGmemAlignH = 4;       // not-in-headers: freedreno_devices.py A6XXGPUInfo gmem_align_w/h, the same for every a6xx (the event blit's granule)
 inline constexpr uint32_t kTileMaxW = 1024, kTileMaxH = 1008;      // not-in-headers: freedreno_devices.py A6XXGPUInfo tile_max_w/h for CHIP.A6XX
 // the border color table both TP base registers point at: Gallium's is FD6_MAX_BORDER_COLORS (256) entries of
