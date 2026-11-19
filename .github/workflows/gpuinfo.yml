@@ -24,12 +24,19 @@ jobs:
             -std=c++17 -O2 -Wall -Wextra -Wno-invalid-constexpr -Iinclude -o out/gpuinfo \
             gpuinfo.cpp gpu.cpp iokit_transport.cpp \
             -framework IOKit -framework CoreFoundation
+          xcrun --sdk iphoneos clang++ -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -O2 -Wall -Wextra -Wno-invalid-constexpr -Iinclude -o out/gpuping \
+            gpuping.cpp gpu.cpp iokit_transport.cpp \
+            -framework IOKit -framework CoreFoundation
           codesign -f -s - out/gpuinfo
-          otool -L out/gpuinfo
-          ls -lh out/gpuinfo
+          codesign -f -s - out/gpuping
+          otool -L out/gpuping
+          ls -lh out/
 
       - uses: actions/upload-artifact@v4
         with:
           name: gpuinfo
-          path: userland/hakios-metal-lite/out/gpuinfo
+          path: |
+            userland/hakios-metal-lite/out/gpuinfo
+            userland/hakios-metal-lite/out/gpuping
           retention-days: 30
