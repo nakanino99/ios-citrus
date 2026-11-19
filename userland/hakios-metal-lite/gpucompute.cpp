@@ -8,12 +8,15 @@
 //   6: chain220_air alone (134 units): reboot first and run this as the boot's first shader (probe.cpp 5a0)
 //   7: probe.cpp 5d2: chain160_air, chain220_air, long_chain_air in turn (A610 preloads 64 units, the rest is fetched)
 //   8: probe.cpp 5a00: the same kernels with the preload cut to 64 and to 120 units
+//   9: probe.cpp 7a: tex_fill_air writes an R32Uint 64x32 image (stib.b.typed.2d at IBO slot 0), then two controls
+//  10: probe.cpp 7a: row padding (48x20) and the four-lane RGBA32Uint format
 // exit: 0 all ok, 6 a check failed, 7 hang (alarm), 64 usage, 2 no GPU, 3 no queue/buffer
 #include <algorithm>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -24,9 +27,11 @@
 #include "fixtures/fill_id.hpp"
 #include "fixtures/fill_id_air.hpp"
 #include "fixtures/long_chain_air.hpp"
+#include "fixtures/tex_fill_air.hpp"
 #include "hakios-metal/a6xx.hpp"
 #include "hakios-metal/command.hpp"
 #include "hakios-metal/compute.hpp"
+#include "hakios-metal/texture.hpp"
 
 using namespace hakios::metal;
 
@@ -179,11 +184,181 @@ static void runChain(CommandQueue& queue, Gpu& gpu, uint64_t faults0, Buffer& ou
                " the one a step short" + where + text + statusLine(r, gpu, faults0));
 }
 
+// --- textures (probe.cpp 7a) -------------------------------------------------------------------------------------------
+static std::string hex8(uint32_t v) {
+    char t[16];
+    std::snprintf(t, sizeof t, "0x%08x", v);
+    return t;
+}
+
+// a canary word for a texture: one that no pixel can come to hold (probe.cpp)
+static uint32_t texCanary(const std::function<bool(uint32_t)>& produced) {
+    uint32_t canary = 0xa5a5a5a5u;
+    while (produced(canary)) canary += 0x01010101u;
+    return canary;
+}
+
+// the whole Bo behind a texture, read once in order (write-combined memory)
+static std::vector<uint8_t> textureBo(const Texture& t) {
+    std::vector<uint8_t> back(t.buffer()->length());
+    std::memcpy(back.data(), t.contents(), back.size());
+    return back;
+}
+static void fillBo(const Texture& t, uint32_t word) {
+    auto* w = static_cast<uint32_t*>(t.contents());
+    for (uint64_t i = 0; i < t.buffer()->length() / 4; i++) w[i] = word;
+}
+
+struct PixelRule {
+    std::function<bool(uint32_t x, uint32_t y)> written;
+    std::function<uint32_t(uint32_t x, uint32_t y, uint32_t lane)> value;
+};
+struct TexReadback {
+    uint32_t covered = 0, right = 0, canary = 0, wrong = 0;
+    uint32_t firstWrongX = 0, firstWrongY = 0, firstWrongLane = 0, firstWrongGot = 0, firstWrongWant = 0;
+    uint32_t uncovered = 0, uncoveredCanary = 0;
+    uint32_t firstTouchedX = 0, firstTouchedY = 0;
+    uint64_t padding = 0, paddingUntouched = 0, firstPaddingTouchedAt = 0;
+};
+static TexReadback compareTexture(const Texture& t, const PixelRule& rule, uint32_t canary) {
+    std::vector<uint8_t> bo = textureBo(t);
+    const uint32_t cpp = t.info().bytesPerPixel, lanes = cpp / 4, W = t.width(), H = t.height();
+    const uint64_t pitch = t.bytesPerRow();
+    TexReadback r;
+    for (uint32_t y = 0; y < H; y++) {
+        for (uint32_t x = 0; x < W; x++) {
+            uint32_t px[4] = {};
+            std::memcpy(px, bo.data() + y * pitch + uint64_t(x) * cpp, cpp);
+            bool isCanary = true;
+            for (uint32_t l = 0; l < lanes; l++) isCanary = isCanary && px[l] == canary;
+            if (rule.written(x, y)) {
+                r.covered++;
+                uint32_t badLane = lanes;
+                for (uint32_t l = 0; l < lanes && badLane == lanes; l++) {
+                    if (px[l] != rule.value(x, y, l)) badLane = l;
+                }
+                if (badLane == lanes) {
+                    r.right++;
+                } else if (isCanary) {
+                    r.canary++;
+                } else {
+                    if (r.wrong == 0) {
+                        r.firstWrongX = x;
+                        r.firstWrongY = y;
+                        r.firstWrongLane = badLane;
+                        r.firstWrongGot = px[badLane];
+                        r.firstWrongWant = rule.value(x, y, badLane);
+                    }
+                    r.wrong++;
+                }
+            } else {
+                r.uncovered++;
+                if (isCanary) {
+                    r.uncoveredCanary++;
+                } else if (r.uncovered - r.uncoveredCanary == 1) {
+                    r.firstTouchedX = x;
+                    r.firstTouchedY = y;
+                }
+            }
+        }
+    }
+    for (uint64_t at = 0; at + 4 <= bo.size(); at += 4) {
+        uint64_t row = at / pitch, inRow = at % pitch;
+        if (row < H && inRow < uint64_t(W) * cpp) continue;   // inside a pixel
+        uint32_t word;
+        std::memcpy(&word, bo.data() + at, 4);
+        r.padding += 4;
+        if (word == canary) r.paddingUntouched += 4;
+        else if (r.padding - r.paddingUntouched == 4) r.firstPaddingTouchedAt = at;
+    }
+    return r;
+}
+static std::string describeTexture(const TexReadback& r, const char* right) {
+    std::string s = std::to_string(r.right) + " of " + std::to_string(r.covered) + " pixels " + right + ", " +
+                    std::to_string(r.canary) + " still canary, " + std::to_string(r.wrong) + " wrong";
+    if (r.wrong) {
+        s += " (first at " + std::to_string(r.firstWrongX) + "," + std::to_string(r.firstWrongY) + " lane " +
+             std::to_string(r.firstWrongLane) + ": got " + hex8(r.firstWrongGot) + " expected " + hex8(r.firstWrongWant) + ")";
+    }
+    if (r.uncovered) {
+        s += "; outside the grid " + std::to_string(r.uncoveredCanary) + " of " + std::to_string(r.uncovered) + " pixels canary";
+        if (r.uncoveredCanary != r.uncovered)
+            s += " (first touched at " + std::to_string(r.firstTouchedX) + "," + std::to_string(r.firstTouchedY) + ")";
+    }
+    return s;
+}
+static void reportPadding(const std::string& label, const TexReadback& r) {
+    if (r.padding == 0) {
+        std::printf("gpucompute: (%s: no padding bytes at this geometry: the rows are the pitch long and fill the Bo)\n",
+                    label.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    report(r.paddingUntouched == r.padding,
+           label + ": row padding: " + std::to_string(r.paddingUntouched) + " of " + std::to_string(r.padding) +
+               " bytes untouched" +
+               (r.paddingUntouched == r.padding ? "" : " (first touched at byte " + std::to_string(r.firstPaddingTouchedAt) + ")"));
+}
+
+// probe.cpp 7a texFill: kernel K over a W x H texture of FORMAT, GROUPS of LOCAL threads. Lane 0 of every covered pixel
+// holds (y * grid.x + x) * K + c, lanes 1-3 x, y, 0xdead where the format has them; every uncovered pixel and every byte
+// of padding is still the canary. The line "start ..." is printed and flushed first, so a hang names itself.
+static void texFill(CommandQueue& queue, Gpu& gpu, uint64_t faults0, Buffer& cbuf, const Kernel& k, PixelFormat format,
+                    const char* formatName, uint32_t W, uint32_t H, const uint32_t local[3], uint32_t groupsX,
+                    uint32_t groupsY, uint32_t c, const std::string& label) {
+    std::printf("gpucompute: start %s\n", label.c_str());
+    std::fflush(stdout);
+    std::string why;
+    TextureDesc d;
+    d.format = format;
+    d.width = W;
+    d.height = H;
+    d.usage = kTextureUsageWrite;
+    auto t = Texture::make(gpu, d, &why);
+    if (t == nullptr) {
+        report(false, label + ": a " + std::to_string(W) + "x" + std::to_string(H) + " " + formatName + " texture: " + why);
+        return;
+    }
+    const uint32_t gridW = groupsX * local[0], gridH = groupsY * local[1];
+    auto value = [=](uint32_t x, uint32_t y, uint32_t lane) -> uint32_t {
+        return lane == 0 ? expectedWord(y * gridW + x, c) : lane == 1 ? x : lane == 2 ? y : 0xdeadu;
+    };
+    const uint32_t lanes = t->info().bytesPerPixel / 4;
+    const uint32_t canary = texCanary([&](uint32_t v) {
+        for (uint32_t y = 0; y < H; y++)
+            for (uint32_t x = 0; x < W; x++)
+                for (uint32_t l = 0; l < lanes; l++)
+                    if (value(x, y, l) == v) return true;
+        return false;
+    });
+    fillBo(*t, canary);
+    static_cast<uint32_t*>(cbuf.contents())[0] = c;
+    Bindings b;
+    b.buffers = {Binding{&cbuf, 0}};   // [[buffer(0)]]: c, a pushed constant
+    b.textures = {t.get()};            // [[texture(0)]]: out, the image at IBO slot 0
+    const uint32_t groups[3] = {groupsX, groupsY, 1};
+    compute::Options o;
+    Run r;
+    r.cb = queue.commandBuffer();
+    r.encoded = r.cb->dispatch(k, groups, local, b, nullptr, o);
+    if (r.encoded) {
+        alarm(20);
+        r.cb->commit();
+        r.cb->waitUntilCompleted();
+        alarm(0);
+    }
+    PixelRule rule{[=](uint32_t x, uint32_t y) { return x < gridW && y < gridH; }, value};
+    TexReadback rb = compareTexture(*t, rule, canary);
+    report(completed(r) && rb.right == rb.covered && rb.covered > 0 && rb.uncoveredCanary == rb.uncovered,
+           label + ": " + describeTexture(rb, "as computed") + statusLine(r, gpu, faults0));
+    reportPadding(label, rb);
+}
+
 int main(int argc, char** argv) {
     const int step = argc > 1 ? std::atoi(argv[1]) : 0;
-    if (step < 1 || step > 8) {
-        std::printf("gpucompute: usage: gpucompute 1..8   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
-                    "4: controls, 5: fill_id_air, 6: chain220 alone, 7: chains, 8: preload cuts)\n");
+    if (step < 1 || step > 10) {
+        std::printf("gpucompute: usage: gpucompute 1..10   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
+                    "4: controls, 5: fill_id_air, 6: chain220 alone, 7: chains, 8: preload cuts, 9-10: tex_fill)\n");
         return 64;
     }
     std::string why;
@@ -272,11 +447,30 @@ int main(int argc, char** argv) {
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain160_air, 160, "chain160_air", 0, true);
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 0, true);
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::long_chain_air, 700, "long_chain_air", 0, true);
-    } else {
+    } else if (step == 8) {
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain160_air, 160, "chain160_air", 64, false);
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 64, false);
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::chain220_air, 220, "chain220_air", 120, false);
         runChain(*queue, gpu, faults0, *out, *cbuf, words, c, kernels::long_chain_air, 700, "long_chain_air", 64, false);
+    } else {
+        const uint32_t local88[3] = {8, 8, 1}, local84[3] = {8, 4, 1};
+        const uint32_t c1 = 0x5678, c2 = 0x6789;
+        const Kernel& k = kernels::tex_fill_air;
+        if (step == 9) {
+            texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kR32Uint, "R32Uint", 64, 32, local88, 8, 4, c1,
+                    "tex_fill R32Uint 64x32, (8,4,1) groups of (8,8,1), c = 0x5678");
+            texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kR32Uint, "R32Uint", 64, 32, local88, 4, 4, c1,
+                    "control, tex_fill R32Uint 64x32 over the left half, (4,4,1) groups");
+            texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kR32Uint, "R32Uint", 64, 32, local88, 8, 4, c2,
+                    "control, tex_fill R32Uint 64x32, c = 0x6789");
+        } else {
+            texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kR32Uint, "R32Uint", 48, 20, local84, 6, 5, c1,
+                    "tex_fill R32Uint 48x20, (6,5,1) groups of (8,4,1), 192-byte rows at a pitch of 256");
+            texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kRGBA32Uint, "RGBA32Uint", 64, 32, local88, 8, 4, c1,
+                    "tex_fill RGBA32Uint 64x32, (8,4,1) groups of (8,8,1), all four lanes");
+            texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kRGBA32Uint, "RGBA32Uint", 48, 20, local84, 6, 5, c1,
+                    "tex_fill RGBA32Uint 48x20, (6,5,1) groups of (8,4,1), 768-byte rows at a pitch of 1024");
+        }
     }
     return failures ? 6 : 0;
 }
