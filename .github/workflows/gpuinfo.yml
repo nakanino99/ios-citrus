@@ -33,6 +33,12 @@ jobs:
             gpucompute.cpp gpu.cpp pm4.cpp command.cpp compute.cpp texture.cpp render.cpp link.cpp \
             compiler.cpp metallib.cpp iokit_transport.cpp \
             -framework IOKit -framework CoreFoundation -framework IOSurface
+          xcrun --sdk iphoneos clang++ -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -O2 -Wall -Wextra -Wno-invalid-constexpr -Iinclude -o out/hakios-metal-probe \
+            tools/probe.cpp gpu.cpp pm4.cpp command.cpp compute.cpp texture.cpp render.cpp link.cpp \
+            compiler.cpp metallib.cpp iokit_transport.cpp \
+            -framework IOKit -framework CoreFoundation -framework IOSurface
+          codesign -f -s - out/hakios-metal-probe
           codesign -f -s - out/gpuinfo
           codesign -f -s - out/gpuping
           codesign -f -s - out/gpucompute
@@ -46,4 +52,5 @@ jobs:
             userland/hakios-metal-lite/out/gpuinfo
             userland/hakios-metal-lite/out/gpuping
             userland/hakios-metal-lite/out/gpucompute
+            userland/hakios-metal-lite/out/hakios-metal-probe
           retention-days: 30
