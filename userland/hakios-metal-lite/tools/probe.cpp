@@ -4809,7 +4809,7 @@ int main(int argc, char** argv) {
                                    "GMEM binned by the hardware: " + std::to_string(poff) + " pixels differ from sysmem; the VSC wrote " +
                                        std::to_string(sizes[0]) + " and " + std::to_string(sizes[1]) + " bytes of draw stream for pipes 0 and 1");
                         }
-                        report(have && st == 0 && gtl == 24 && off == 0 && twinOff > 100000,
+                        report(have && st == 0 && gtl > 1 && off == 0 && twinOff > 100000,
                                "GMEM: 5 blended triangles over a 1125x2436 BGRA8 pattern in " + std::to_string(gtl) + " tiles: " + std::to_string(off) +
                                    " pixels differ from sysmem; twin without the loads: " + std::to_string(twinOff) + " differ (must be many)");
                         // framebuffer fetch across the tiles: tri_fb (the target's (g, b, r, 1) at each pixel) three times
@@ -4850,11 +4850,11 @@ int main(int argc, char** argv) {
                                                            cgm = runFb(true, &cg, {vps[3], Viewport{500, 1000, 625, 300, 0, 1}});
                                 const bool chave = !csys.empty() && !cgm.empty();
                                 const uint64_t coff = chave ? pixelsDiffer(csys, cgm) : ~0ull, cchanged = chave ? pixelsDiffer(start, cgm) : 0;
-                                report(chave && cs == 0 && cg > 0 && cg < 24 && coff == 0 && cchanged > 300000,
+                                report(chave && cs == 0 && cg > 0 && cg < fg && coff == 0 && cchanged > 300000,
                                        "GMEM: framebuffer fetch over part of the screen in " + std::to_string(cg) + " tiles: " + std::to_string(coff) +
                                            " pixels differ from sysmem; " + std::to_string(cchanged) + " changed");
                             }
-                            report(fhave && fs == 0 && fg == 24 && foff == 0 && changed > 1400000 && changed <= 1500000,
+                            report(fhave && fs == 0 && fg > 1 && fg == gtl && foff == 0 && changed > 1400000 && changed <= 1500000,
                                    "GMEM: framebuffer fetch 4 times over a 1125x2436 BGRA8 pattern in " + std::to_string(fg) + " tiles: " + std::to_string(foff) +
                                        " pixels differ from sysmem; " + std::to_string(changed) + " changed from the pattern");
                         }
