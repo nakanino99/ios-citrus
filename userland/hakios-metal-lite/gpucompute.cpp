@@ -11,8 +11,10 @@
 //   9: probe.cpp 7a: tex_fill_air writes an R32Uint 64x32 image (stib.b.typed.2d at IBO slot 0), then two controls
 //  10: probe.cpp 7a: row padding (48x20) and the four-lane RGBA32Uint format
 //  11: probe.cpp 7b: tex_copy_air reads a texture through the texture table (isaml t#1) and writes it to an image
+//  12: probe.cpp 7c: tex_sample_gid_air through a sampler of Metal's (saml s#0), nearest and linear
 // exit: 0 all ok, 6 a check failed, 7 hang (alarm), 64 usage, 2 no GPU, 3 no queue/buffer
 #include <algorithm>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -30,6 +32,7 @@
 #include "fixtures/long_chain_air.hpp"
 #include "fixtures/tex_copy_air.hpp"
 #include "fixtures/tex_fill_air.hpp"
+#include "fixtures/tex_sample_gid_air.hpp"
 #include "hakios-metal/a6xx.hpp"
 #include "hakios-metal/command.hpp"
 #include "hakios-metal/compute.hpp"
@@ -421,11 +424,236 @@ static void texCopy(CommandQueue& queue, Gpu& gpu, uint64_t faults0, uint32_t W,
                                          std::to_string(rin.covered) + " pixels still the pattern");
 }
 
+// --- samplers (probe.cpp 7c) -------------------------------------------------------------------------------------------
+// an N x N RGBA8Unorm texture whose pixel (x, y) is the bytes (32x, 32y, 16(x^y)+7, 255): every neighbour differs in
+// every channel; sampled by the 8x8 grid of one group at the normalized centres ((gx+0.5)/8, (gy+0.5)/8) into
+// out[gy*8+gx], 64 float4 of a device buffer NaN-canaried with 0x7fc00001, a payload no unorm sample can produce
+static const uint32_t kNanCanary = 0x7fc00001u;
+
+static uint32_t pixelByte(uint32_t x, uint32_t y, uint32_t ch) {
+    return ch == 0 ? 32 * x : ch == 1 ? 32 * y : ch == 2 ? 16 * (x ^ y) + 7 : 255;
+}
+
+static std::shared_ptr<Texture> patternTexture(Gpu& gpu, uint32_t n) {
+    std::string why;
+    TextureDesc d;
+    d.format = PixelFormat::kRGBA8Unorm;
+    d.width = d.height = n;
+    d.usage = kTextureUsageRead;
+    auto t = Texture::make(gpu, d, &why);
+    if (t == nullptr) {
+        report(false, "a " + std::to_string(n) + "x" + std::to_string(n) + " RGBA8Unorm texture: " + why);
+        return nullptr;
+    }
+    std::vector<uint8_t> host(size_t(n) * n * 4);
+    for (uint32_t y = 0; y < n; y++)
+        for (uint32_t x = 0; x < n; x++)
+            for (uint32_t ch = 0; ch < 4; ch++) host[(size_t(y) * n + x) * 4 + ch] = uint8_t(pixelByte(x, y, ch));
+    fillBo(*t, 0x3c3c3c3cu);
+    std::string whyReplace;
+    if (!t->replace(0, 0, n, n, host.data(), uint64_t(n) * 4, &whyReplace)) {
+        report(false, "Texture::replace of the " + std::to_string(n) + "x" + std::to_string(n) + " pattern: " + whyReplace);
+        return nullptr;
+    }
+    return t;
+}
+
+struct Sampled {
+    std::vector<uint32_t> bits;   // 64 x 4 lanes as written, the canary where nothing was
+    Run run;
+    float at(uint32_t i) const {
+        float f;
+        std::memcpy(&f, &bits[i], 4);
+        return f;
+    }
+};
+
+static Sampled sampleOnce(CommandQueue& queue, Buffer& sampleOut, const Texture& tex, const Sampler& smp,
+                          const std::string& label) {
+    std::printf("gpucompute: start %s\n", label.c_str());
+    std::fflush(stdout);
+    auto* w = static_cast<uint32_t*>(sampleOut.contents());
+    for (uint32_t i = 0; i < 256; i++) w[i] = kNanCanary;
+    Bindings b;
+    b.buffers = {Binding{&sampleOut, 0}};   // [[buffer(0)]]: out
+    b.textures = {&tex};                    // [[texture(0)]]
+    b.samplers = {&smp};                    // [[sampler(0)]]
+    const uint32_t one[3] = {1, 1, 1}, local88[3] = {8, 8, 1};
+    compute::Options o;
+    Sampled r;
+    r.run.cb = queue.commandBuffer();
+    r.run.encoded = r.run.cb->dispatch(kernels::tex_sample_gid_air, one, local88, b, nullptr, o);
+    if (r.run.encoded) {
+        alarm(20);
+        r.run.cb->commit();
+        r.run.cb->waitUntilCompleted();
+        alarm(0);
+    }
+    r.bits.resize(256);
+    std::memcpy(r.bits.data(), sampleOut.contents(), 1024);
+    return r;
+}
+
+// 64 pixels of 4 lanes against EXPECTED(gx, gy, ch) within TOLERANCE; a pixel whose lanes still hold the canary bits is
+// counted apart (it was not written), one with a NaN or beyond the tolerance is off
+struct SampleCheck {
+    uint32_t within = 0, canary = 0, off = 0, differ = 0;
+    float maxDev = 0, maxDiff = 0;
+    uint32_t firstX = 0, firstY = 0, firstLane = 0;
+    float firstGot = 0, firstWant = 0;
+};
+static SampleCheck checkSamples(const Sampled& s, const std::function<float(uint32_t, uint32_t, uint32_t)>& expected,
+                                float tolerance, const Sampled* against) {
+    SampleCheck c;
+    for (uint32_t gy = 0; gy < 8; gy++) {
+        for (uint32_t gx = 0; gx < 8; gx++) {
+            uint32_t i = (gy * 8 + gx) * 4;
+            bool isCanary = true;
+            for (uint32_t ch = 0; ch < 4; ch++) isCanary = isCanary && s.bits[i + ch] == kNanCanary;
+            if (isCanary) {
+                c.canary++;
+                continue;
+            }
+            float dev = 0, diff = 0;
+            uint32_t worst = 0;
+            for (uint32_t ch = 0; ch < 4; ch++) {
+                float got = s.at(i + ch), d = std::fabs(got - expected(gx, gy, ch));
+                if (std::isnan(d)) d = INFINITY;
+                if (d > dev) {
+                    dev = d;
+                    worst = ch;
+                }
+                if (against) {
+                    float o = std::fabs(got - against->at(i + ch));
+                    if (std::isnan(o)) o = INFINITY;
+                    diff = std::max(diff, o);
+                }
+            }
+            c.maxDev = std::max(c.maxDev, dev);
+            c.maxDiff = std::max(c.maxDiff, diff);
+            if (against && diff > 1.0f / 512) c.differ++;
+            if (dev <= tolerance) {
+                c.within++;
+            } else {
+                if (c.off == 0) {
+                    c.firstX = gx;
+                    c.firstY = gy;
+                    c.firstLane = worst;
+                    c.firstGot = s.at(i + worst);
+                    c.firstWant = expected(gx, gy, worst);
+                }
+                c.off++;
+            }
+        }
+    }
+    return c;
+}
+static std::string describeSamples(const SampleCheck& c, const char* tolerance) {
+    char text[200];
+    std::snprintf(text, sizeof text, "%u of 64 pixels within %s, %u still canary, %u off, max deviation %.6f", c.within,
+                  tolerance, c.canary, c.off, c.maxDev);
+    std::string s = text;
+    if (c.off) {
+        std::snprintf(text, sizeof text, " (first at %u,%u lane %u: got %.6f expected %.6f)", c.firstX, c.firstY,
+                      c.firstLane, c.firstGot, c.firstWant);
+        s += text;
+    }
+    return s;
+}
+
+static void sampleStep(CommandQueue& queue, Gpu& gpu, uint64_t faults0) {
+    std::string why;
+    auto sampleOut = newBuffer(gpu, 64 * 16, &why);
+    if (sampleOut == nullptr || sampleOut->contents() == nullptr) {
+        report(false, "a buffer of 64 float4 for the samples: " + why);
+        return;
+    }
+    Sampler nearest{}, linear{};
+    SamplerDesc sd;   // Metal's defaults: nearest, clamp to edge, normalized coordinates, not mipmapped
+    bool haveNearest = makeSampler(sd, &nearest, &why);
+    if (!haveNearest) report(false, "the default sampler (nearest, clamp to edge): " + why);
+    sd.minFilter = sd.magFilter = 1;   // MTLSamplerMinMagFilterLinear
+    bool haveLinear = makeSampler(sd, &linear, &why);
+    if (!haveLinear) report(false, "the linear sampler: " + why);
+    {
+        // the refusals of makeSampler, by name: what the dispatch would not know how to encode
+        SamplerDesc bad;
+        Sampler sm{};
+        std::string whyBad;
+        bad.maxAnisotropy = 17;   // past Metal's 16
+        bool accepted = makeSampler(bad, &sm, &whyBad);
+        report(!accepted && !whyBad.empty(),
+               std::string("control, makeSampler with anisotropy 17: ") + (accepted ? "ACCEPTED" : "refused: " + whyBad));
+        bad = SamplerDesc{};
+        bad.sAddress = 5;
+        bad.borderColor = 3;   // past MTLSamplerBorderColor's three
+        accepted = makeSampler(bad, &sm, &whyBad);
+        report(!accepted && !whyBad.empty(),
+               std::string("control, makeSampler with border colour 3: ") + (accepted ? "ACCEPTED" : "refused: " + whyBad));
+    }
+    auto tex8 = patternTexture(gpu, 8);
+    if (!(tex8 && haveNearest && haveLinear)) return;
+
+    // nearest at the centres: the texel itself, v/255, within half a unorm step
+    auto texel8 = [&](uint32_t gx, uint32_t gy, uint32_t ch) { return pixelByte(gx, gy, ch) / 255.0f; };
+    Sampled near8 = sampleOnce(queue, *sampleOut, *tex8, nearest, "tex_sample_gid nearest over 8x8 at the texel centres");
+    SampleCheck c = checkSamples(near8, texel8, 1.0f / 512, nullptr);
+    report(completed(near8.run) && c.within == 64,
+           "tex_sample_gid nearest over 8x8 RGBA8Unorm at the texel centres: " + describeSamples(c, "1/512 of the texel") +
+               statusLine(near8.run, gpu, faults0));
+    // linear at the centres: the weights are 1 and 0, so the same texel; how many pixels differ from nearest must be 0
+    Sampled lin8 = sampleOnce(queue, *sampleOut, *tex8, linear, "tex_sample_gid linear over 8x8 at the texel centres");
+    c = checkSamples(lin8, texel8, 1.0f / 512, &near8);
+    char diff[120];
+    std::snprintf(diff, sizeof diff, "; differs from nearest at %u of 64 pixels (max |linear - nearest| %.6f)", c.differ, c.maxDiff);
+    report(completed(lin8.run) && c.within == 64 && c.differ == 0,
+           "tex_sample_gid linear over 8x8 at the texel centres: " + describeSamples(c, "1/512 of the texel") + diff +
+               statusLine(lin8.run, gpu, faults0));
+
+    // the control that the sampler state took effect: a 4x4 texture under the same 8x8 grid puts every sample at a
+    // quarter or three-quarter position between texels ((gx+0.5)/8 * 4 - 0.5 = gx/2 - 0.25 in texel space). Nearest
+    // reads texel (gx/2, gy/2); linear mixes the four neighbours with weights 1/4 and 3/4 (clamped to the edge); the two
+    // must differ wherever the mix is not one texel, and the probe counts where, from the same rule
+    auto tex4 = patternTexture(gpu, 4);
+    if (!tex4) return;
+    auto texel4 = [&](uint32_t gx, uint32_t gy, uint32_t ch) {
+        return pixelByte(uint32_t(std::floor((gx + 0.5f) / 8.0f * 4)), uint32_t(std::floor((gy + 0.5f) / 8.0f * 4)), ch) / 255.0f;
+    };
+    auto bilinear4 = [&](uint32_t gx, uint32_t gy, uint32_t ch) {
+        float u = (gx + 0.5f) / 8.0f * 4 - 0.5f, v = (gy + 0.5f) / 8.0f * 4 - 0.5f;
+        int i0 = int(std::floor(u)), j0 = int(std::floor(v));
+        float f = u - float(i0), g = v - float(j0);
+        auto clampi = [](int i) { return uint32_t(std::min(std::max(i, 0), 3)); };
+        auto p = [&](int i, int j) { return pixelByte(clampi(i), clampi(j), ch) / 255.0f; };
+        return (1 - f) * (1 - g) * p(i0, j0) + f * (1 - g) * p(i0 + 1, j0) + (1 - f) * g * p(i0, j0 + 1) + f * g * p(i0 + 1, j0 + 1);
+    };
+    uint32_t expectDiffer = 0;
+    for (uint32_t gy = 0; gy < 8; gy++)
+        for (uint32_t gx = 0; gx < 8; gx++) {
+            bool differs = false;
+            for (uint32_t ch = 0; ch < 4; ch++)
+                differs = differs || std::fabs(bilinear4(gx, gy, ch) - texel4(gx, gy, ch)) > 1.0f / 512;
+            expectDiffer += differs;
+        }
+    Sampled near4 = sampleOnce(queue, *sampleOut, *tex4, nearest, "control, tex_sample_gid nearest over 4x4 by the 8x8 grid");
+    c = checkSamples(near4, texel4, 1.0f / 512, nullptr);
+    report(completed(near4.run) && c.within == 64,
+           "control, tex_sample_gid nearest over 4x4 sampled by the 8x8 grid: " +
+               describeSamples(c, "1/512 of texel (gx/2, gy/2)") + statusLine(near4.run, gpu, faults0));
+    Sampled lin4 = sampleOnce(queue, *sampleOut, *tex4, linear, "control, tex_sample_gid linear over 4x4 by the 8x8 grid");
+    c = checkSamples(lin4, bilinear4, 1.0f / 255 + 1.0f / 512, &near4);
+    std::snprintf(diff, sizeof diff, "; differs from nearest at %u of 64 pixels, expected %u (max |linear - nearest| %.6f)",
+                  c.differ, expectDiffer, c.maxDiff);
+    report(completed(lin4.run) && c.within == 64 && c.differ == expectDiffer,
+           "control, tex_sample_gid linear over 4x4 sampled by the 8x8 grid (quarter positions): " +
+               describeSamples(c, "1/255 + 1/512 of the bilinear expectation") + diff + statusLine(lin4.run, gpu, faults0));
+}
+
 int main(int argc, char** argv) {
     const int step = argc > 1 ? std::atoi(argv[1]) : 0;
-    if (step < 1 || step > 11) {
-        std::printf("gpucompute: usage: gpucompute 1..11   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
-                    "4: controls, 5: fill_id_air, 6: chain220 alone, 7: chains, 8: preload cuts, 9-10: tex_fill, 11: tex_copy)\n");
+    if (step < 1 || step > 12) {
+        std::printf("gpucompute: usage: gpucompute 1..12   (1: end_only no tail, 2: end_only whole, 3: fill_id, "
+                    "4: controls, 5: fill_id_air, 6: chain220 alone, 7: chains, 8: preload cuts, 9-10: tex_fill, 11: tex_copy, 12: sampler)\n");
         return 64;
     }
     std::string why;
@@ -538,7 +766,7 @@ int main(int argc, char** argv) {
             texFill(*queue, gpu, faults0, *cbuf, k, PixelFormat::kRGBA32Uint, "RGBA32Uint", 48, 20, local84, 6, 5, c1,
                     "tex_fill RGBA32Uint 48x20, (6,5,1) groups of (8,4,1), 768-byte rows at a pitch of 1024");
         }
-    } else {
+    } else if (step == 11) {
         const uint32_t local88[3] = {8, 8, 1}, local84[3] = {8, 4, 1};
         texCopy(*queue, gpu, faults0, 64, 32, local88, 8, 4,
                 "tex_copy R32Uint 64x32, in at texture 1 (isaml), out at texture 0 (IBO slot 0), (8,4,1) groups of (8,8,1)");
@@ -559,6 +787,8 @@ int main(int argc, char** argv) {
                    std::string("control, Texture::replace of 2 pixels starting at the last column of 8x8: ") +
                        (accepted ? "ACCEPTED a region past the width" : "refused: " + whyReplace));
         }
+    } else {
+        sampleStep(*queue, gpu, faults0);
     }
     return failures ? 6 : 0;
 }
