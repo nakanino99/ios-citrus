@@ -4751,7 +4751,7 @@ int main(int argc, char** argv) {
                             {
                                 std::string vw;
                                 auto v = queue->vscBuffer(&vw);
-                                if (v != nullptr && v->contents() != nullptr) memcpy(sizes, static_cast<const uint8_t*>(v->contents()) + 32ull * render::kVscDrawPitch, 8);
+                                if (v != nullptr && v->contents() != nullptr) memcpy(sizes, static_cast<const uint8_t*>(v->contents()) + uint64_t(a6xx::kNumVscPipes) * render::kVscDrawPitch, 8);
                             }
                             gbStage = 0;
                             // --bin-trace: the stages that hang, each with the command processor writing where it has got to
@@ -4763,7 +4763,7 @@ int main(int argc, char** argv) {
                                 std::string vw;
                                 auto v = queue->vscBuffer(&vw);
                                 uint32_t* word = v != nullptr && v->contents() != nullptr
-                                                     ? reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(v->contents()) + 32ull * render::kVscDrawPitch + render::kVscTraceAt)
+                                                     ? reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(v->contents()) + uint64_t(a6xx::kNumVscPipes) * render::kVscDrawPitch + render::kVscTraceAt)
                                                      : nullptr;
                                 if (word != nullptr) std::memset(v->contents(), 0, render::vscBytes()), *word = 0xdead;
                                 gbStage = sg & 0x7f;
@@ -4792,7 +4792,7 @@ int main(int argc, char** argv) {
                                     const uint64_t words = render::vscBytes() / 4;
                                     std::string line;
                                     for (uint64_t g = 0; g < words; g += 16) {
-                                        if (g * 4 >= 32ull * render::kVscDrawPitch && g * 4 < 32ull * render::kVscDrawPitch + render::kVscSizesBytes) continue;
+                                        if (g * 4 >= uint64_t(a6xx::kNumVscPipes) * render::kVscDrawPitch && g * 4 < uint64_t(a6xx::kNumVscPipes) * render::kVscDrawPitch + render::kVscSizesBytes) continue;
                                         bool any = false;
                                         for (uint64_t i = g; i < g + 16 && i < words; i++) any = any || all[i] != 0;
                                         if (!any) continue;
