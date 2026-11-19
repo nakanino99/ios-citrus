@@ -374,13 +374,15 @@ static const char* dimName(uint8_t dim) {
 }
 
 int main(int argc, char** argv) {
-    bool recover = false, bisect = false, binTrace = false;
+    bool recover = false, bisect = false, binTrace = false, skipFb = false, skipFbGmem = false;
     compute::Options chosen;   // what the dispatches of stage 5 are encoded with
     std::vector<std::pair<std::string, std::string>> metallibs;   // --metallib FILE FUNCTION: a kernel of the phone's own image
     for (int i = 1; i < argc; i++) {
         recover = recover || strcmp(argv[i], "--recover") == 0;
         bisect = bisect || strcmp(argv[i], "--bisect") == 0;
         binTrace = binTrace || strcmp(argv[i], "--bin-trace") == 0;
+        skipFb = skipFb || strcmp(argv[i], "--skip-fb") == 0;            // 9u: no framebuffer fetch at all
+        skipFbGmem = skipFbGmem || strcmp(argv[i], "--fb-no-gmem") == 0; // 9u: only the sysmem kinds
         // --notail: no end-of-dispatch events and waits of our own; the kernel's own CACHE_FLUSH_TS fence closes the
         // submission (28 October: with them every dispatch hung, without them end_only completed in 48 us)
         if (strcmp(argv[i], "--notail") == 0) chosen.tail = false;
@@ -4155,7 +4157,7 @@ int main(int argc, char** argv) {
         // a fetch that read nothing would leave 00 00 00 ff, one that read the clear twice 80 bf 40 ff. Then the two
         // draws without the barrier (Options::fbReadBarrier off): reported, not judged -- whatever it gives says what the
         // barrier is for on this GPU, a measurement either way.
-        if (t) {
+        if (t && !skipFb) {
             const Program fbProg{kernels::tri_flat_vs_air, kernels::tri_fb_fs_air, Linkage{}, "tri_fb"};
             const uint32_t once = 0xff40bf80u, twice = 0xff8040bfu;
             // Each kind: GMEM or sysmem; one draw or two; ordered by the rasterizer (fbReadOrdered, the default), by the
@@ -4167,6 +4169,10 @@ int main(int argc, char** argv) {
             const FbKind kinds[] = {{true, false, 0}, {true, true, 0}, {true, true, 1}, {true, true, 2},
                                     {false, false, 0}, {false, true, 0}, {false, true, 1}, {false, true, 2}};
             for (const FbKind& k : kinds) {
+                if (skipFbGmem && k.gmem) continue;
+                std::printf("probe: start framebuffer fetch: %s, %s draw, order %d\n", k.gmem ? "GMEM" : "sysmem",
+                            k.two ? "two" : "one", k.order);
+                std::fflush(stdout);
                 fillBo(*t, canary);
                 render::Options o;
                 o.fbReadOrdered = k.order == 0;   // (in sysmem the ordering is not used: the barrier, as order 1)
