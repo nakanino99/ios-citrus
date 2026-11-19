@@ -1243,8 +1243,9 @@ bool makeSampler(const SamplerDesc& d, Sampler* out, std::string* why) {
     if (d.minFilter > 2 || d.magFilter > 2) {
         return refuse(why, "sampler filters min " + n(d.minFilter) + " mag " + n(d.magFilter) + ": Nearest (0), Linear (1) or bicubic (2)");
     }
-    // bicubic is the TP's own cubic filter, which this chip has (freedreno_devices.py a6xx_gen4 has_tex_filter_cubic;
-    // turnip's VK_FILTER_CUBIC_EXT, tu6_tex_filter)
+    // bicubic is the TP's own cubic filter (turnip's VK_FILTER_CUBIC_EXT, tu6_tex_filter). freedreno_devices.py sets
+    // has_tex_filter_cubic for a6xx_gen3 and a6xx_gen4 and not for a6xx_gen1_low (the A610): the bits are encoded here, but on
+    // this chip the phone's probe (9j6, "bicubic over a step") sees the linear filter's result
     auto filter = [](uint32_t m) { return m == 2 ? A6XX_TEX_CUBIC : m == 1 ? A6XX_TEX_LINEAR : A6XX_TEX_NEAREST; };
     f.min = filter(d.minFilter);
     f.mag = filter(d.magFilter);
