@@ -1,0 +1,30 @@
+name: gpuinfo
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build gpuinfo (read-only: GET_PARAM and one buffer, no command stream)
+        working-directory: userland/hakios-metal-lite
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p out
+          xcrun --sdk iphoneos clang++ -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" \
+            -std=c++17 -O2 -Wall -Wextra -Iinclude -o out/gpuinfo \
+            gpuinfo.cpp gpu.cpp iokit_transport.cpp \
+            -framework IOKit -framework CoreFoundation
+          codesign -f -s - out/gpuinfo
+          otool -L out/gpuinfo
+          ls -lh out/gpuinfo
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gpuinfo
+          path: userland/hakios-metal-lite/out/gpuinfo
+          retention-days: 30
