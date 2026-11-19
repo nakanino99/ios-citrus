@@ -21,7 +21,7 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p out
           xcrun --sdk iphoneos clang++ -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" \
-            -std=c++17 -O2 -Wall -Wextra -Iinclude -o out/gpuinfo \
+            -std=c++17 -O2 -Wall -Wextra -Wno-invalid-constexpr -Iinclude -o out/gpuinfo \
             gpuinfo.cpp gpu.cpp iokit_transport.cpp \
             -framework IOKit -framework CoreFoundation
           codesign -f -s - out/gpuinfo
