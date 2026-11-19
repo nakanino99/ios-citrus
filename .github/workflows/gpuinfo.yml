@@ -2,6 +2,11 @@ name: gpuinfo
 
 on:
   workflow_dispatch:
+  push:
+    branches: [citrus]
+    paths:
+      - ".github/workflows/gpuinfo.yml"
+      - "userland/hakios-metal-lite/**"
 
 jobs:
   build:
@@ -10,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build gpuinfo (read-only: GET_PARAM and one buffer, no command stream)
+      - name: "Build gpuinfo (read-only, GET_PARAM and one buffer)"
         working-directory: userland/hakios-metal-lite
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
