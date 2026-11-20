@@ -1,0 +1,36 @@
+name: mesa-air
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          brew install meson ninja bison flex pkg-config
+
+      - name: Cache Mesa source and build
+        uses: actions/cache@v4
+        with:
+          path: userland/mesa-air/build
+          key: mesa-air-25.0.7-${{ hashFiles('userland/mesa-air/patches/**', 'userland/mesa-air/air/**', 'userland/mesa-air/hakios-drm/**', 'userland/mesa-air/mk-mesa-air.sh') }}
+
+      - name: "Build the compiler archives (AIR front end, NIR, ir3)"
+        working-directory: userland/mesa-air
+        run: |
+          ./mk-mesa-air.sh || {
+            echo "=== meson-setup.log ==="
+            tail -n 60 build/meson-setup.log 2>/dev/null || true
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mesa-air-report
+          path: userland/mesa-air/build/report.txt
+          retention-days: 14
