@@ -1,0 +1,46 @@
+name: metalplugin
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [citrus]
+    paths:
+      - ".github/workflows/metalplugin.yml"
+      - "userland/hakios-metal-lite/**"
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Build HakiosMetal.bundle and metal_test"
+        working-directory: userland/hakios-metal-lite
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --sdk iphoneos -f clang)
+          CXX=$(xcrun --sdk iphoneos -f clang++)
+          T="-arch arm64 -target arm64-apple-ios16.0 -isysroot $SDK"
+          mkdir -p out/obj out/dist/HakiosMetal.bundle
+          for f in pm4 gpu command compute texture render link compiler metallib c_api fake_gpu iokit_transport; do
+            "$CXX" $T -std=c++17 -O2 -Wno-invalid-constexpr -I. -Iinclude -c $f.cpp -o out/obj/$f.o
+          done
+          ar rcs out/libhakios-metal.a out/obj/*.o
+          "$CLANG" $T -O2 -Wno-deprecated-declarations -bundle -DHAKIOS_METAL_GPU -Iinclude -Iplugin \
+            -o out/dist/HakiosMetal.bundle/HakiosMetal plugin/HakiosMetal.m plugin/hakios_metallib.c out/libhakios-metal.a \
+            -lc++ -lobjc -framework Foundation -framework Metal -framework IOKit -framework IOSurface
+          cp plugin/HakiosMetal.plist out/dist/HakiosMetal.bundle/Info.plist
+          "$CLANG" $T -O2 -Wno-deprecated-declarations -o out/dist/metal_test metal_test.m \
+            -lobjc -framework Foundation -framework CoreFoundation -framework CoreImage -framework IOKit -framework Metal
+          codesign -f -s - out/dist/HakiosMetal.bundle
+          codesign -f -s - out/dist/metal_test
+          otool -L out/dist/HakiosMetal.bundle/HakiosMetal
+          ls -lR out/dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metalplugin
+          path: userland/hakios-metal-lite/out/dist
+          retention-days: 30
