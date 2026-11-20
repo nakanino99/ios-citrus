@@ -33,7 +33,7 @@ jobs:
             -lc++ -lobjc -framework Foundation -framework Metal -framework IOKit -framework IOSurface
           cp plugin/HakiosMetal.plist out/dist/HakiosMetal.bundle/Info.plist
           "$CLANG" $T -O2 -Wno-deprecated-declarations -o out/dist/metal_test metal_test.m \
-            -lobjc -framework Foundation -framework CoreFoundation -framework CoreImage -framework IOKit -framework Metal
+            -lobjc -framework Foundation -framework CoreFoundation -framework CoreImage -framework CoreGraphics -framework OpenGLES -framework IOKit -framework Metal -lMobileGestalt
           codesign -f -s - out/dist/HakiosMetal.bundle
           codesign -f -s - out/dist/metal_test
           otool -L out/dist/HakiosMetal.bundle/HakiosMetal
