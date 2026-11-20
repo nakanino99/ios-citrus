@@ -1,0 +1,20 @@
+From: x <x@x>
+Subject: [PATCH] topaz-0139: IOAcceleratorES names HakiosMetal as its Metal plug-in when boot-arg metal is set
+
+---
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -407,6 +407,13 @@
+ 	IOAcceleratorES *accel = accelOn ? OSTypeAlloc(IOAcceleratorES) : NULL;
+ 	if (accel != NULL && accel->init()) {
+ 		accel->setName("sgx");
++		/* boot-arg metal=N: the accelerator names the Metal plug-in (docs/metal-plan.md step 1 of hakios).
++		 * Without the argument nothing changes: a device that cannot draw yet breaks the window server. */
++		uint32_t metalOn = 0;
++		if (PE_parse_boot_argn("metal", &metalOn, sizeof(metalOn)) && metalOn != 0) {
++			accel->setProperty("MetalPluginName", "HakiosMetal");
++			IOLog("SWEET FB: metal=%u: the accelerator names HakiosMetal as its Metal plug-in\n", metalOn);
++		}
+ 		if (accel->attach(this)) {
+ 			accel->registerService();
+ 			IOLog("SWEET FB: empty IOAcceleratorES published (no 30 s wait in CAMetalContextCreate)\n");
