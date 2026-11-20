@@ -358,7 +358,21 @@ static std::string compareCompiled(const Kernel& a, const Kernel& b, bool* same)
     bool sameTextures = memcmp(a.textures, b.textures, sizeof a.textures) == 0 && a.numTextureSlots == b.numTextureSlots &&
                         a.samplerMask == b.samplerMask;
     *same = sameWords && sameLayout && sameTextures;
-    return std::to_string(a.numWords) + " words, " + (sameWords ? "the same as the host's" : "DIFFERENT from the host's") + ", layout " +
+    std::string note;
+    if (!sameWords) {
+        const uint32_t n = a.numWords < b.numWords ? a.numWords : b.numWords;
+        uint32_t nd = 0, first = ~0u;
+        for (uint32_t i = 0; i < n; i++)
+            if (uint32_t(a.words[i]) != uint32_t(b.words[i])) {
+                if (first == ~0u) first = i;
+                nd++;
+            }
+        note = " [host " + std::to_string(b.numWords) + " words; " + std::to_string(nd) + " of " + std::to_string(n) + " differ" +
+               (first != ~0u ? ", the first at " + std::to_string(first) + ": phone " + hex8(uint32_t(a.words[first])) + ", host " +
+                                   hex8(uint32_t(b.words[first]))
+                             : std::string()) + "]";
+    }
+    return std::to_string(a.numWords) + " words, " + (sameWords ? "the same as the host's" : "DIFFERENT from the host's") + note + ", layout " +
            (sameLayout ? "the same" : "DIFFERENT") + ", texture fields " + (sameTextures ? "the same" : "DIFFERENT") + " (numTextureSlots " +
            std::to_string(a.numTextureSlots) + ", samplerMask " + hex8(a.samplerMask) + ")";
 }
@@ -875,6 +889,22 @@ int main(int argc, char** argv) {
                                                 " for " + std::to_string(k.cpu(firstWrong))
                                           : std::string()) +
                        ", " + std::to_string(tail) + " of 64 canary words untouched" + status(*cb, gpu));
+            if (right != 1024) {
+                std::printf("probe: (%s, words right per group of 64:", k.name);
+                for (uint32_t grp = 0; grp < 16; grp++) {
+                    uint32_t r = 0;
+                    for (uint32_t l = 0; l < 64; l++) r += w[grp * 64 + l] == k.cpu(grp * 64 + l);
+                    std::printf(" %u", r);
+                }
+                std::printf(")\n");
+                for (uint32_t grp = 0; grp < 2; grp++) {
+                    std::printf("probe: (%s, group %u, got/want of lanes 0..7 and 32..35:", k.name, grp);
+                    for (uint32_t l = 0; l < 8; l++) std::printf(" %08x/%08x", w[grp * 64 + l], k.cpu(grp * 64 + l));
+                    std::printf(" |");
+                    for (uint32_t l = 32; l < 36; l++) std::printf(" %08x/%08x", w[grp * 64 + l], k.cpu(grp * 64 + l));
+                    std::printf(")\n");
+                }
+            }
         }
     }
 
