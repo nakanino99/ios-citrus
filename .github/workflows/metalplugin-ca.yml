@@ -49,7 +49,10 @@ jobs:
           "$CLANG" $T -O2 -Wno-deprecated-declarations -bundle -DHAKIOS_METAL_GPU -Iinclude -Iplugin \
             -o out/dist-ca/HakiosMetal.bundle/HakiosMetal plugin/HakiosMetalCA.m \
             out/libhakios-metal-ca.a $LIBS -lc++ -lz -lm -lobjc \
-            -framework Foundation -framework Metal -framework IOKit -framework IOSurface -framework CoreFoundation
+            -framework Foundation -framework Metal -framework IOKit -framework IOSurface -framework CoreFoundation \
+            -Wl,-U,_native_bridge_metal_open -Wl,-U,_native_bridge_metal_first_problem -Wl,-U,_native_bridge_metal_status \
+            -Wl,-U,_native_bridge_metal_formats -Wl,-U,_native_bridge_metal_variant_hook
+          nm -m out/dist-ca/HakiosMetal.bundle/HakiosMetal | grep native_bridge || true
           cp plugin/HakiosMetal.plist out/dist-ca/HakiosMetal.bundle/Info.plist
           codesign -f -s - out/dist-ca/HakiosMetal.bundle
           ls -lR out/dist-ca
