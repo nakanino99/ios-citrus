@@ -150,6 +150,13 @@ hm_print(const char *fmt, ...)
 		}
 		hm_print_fd = fd;
 		(void)!write(fd, line, strlen(line));
+		/* (topaz) the window server's lines also to a file: its stderr is the console, which nothing reads back */
+		if (strcmp(getprogname(), "backboardd") == 0) {
+			static int lf = -2, kept;
+
+			if (lf == -2) lf = open("/var/tmp/hakios-metal-backboardd.log", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+			if (lf >= 0 && kept++ < 20000) (void)!write(lf, line, strlen(line));
+		}
 	}
 }
 
