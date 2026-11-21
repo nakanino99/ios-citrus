@@ -1,0 +1,19 @@
+name: qcmetallib
+on:
+  workflow_dispatch:
+jobs:
+  fetch:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - run: |
+          set -e
+          F=/System/Library/Frameworks/QuartzCore.framework/Versions/A/Resources/default.metallib
+          [ -f "$F" ] || { find /System/Library/Frameworks/QuartzCore.framework -name '*metallib*' | head; exit 1; }
+          mkdir -p out && cp "$F" out/QC-mac-default.metallib
+          ls -l out; file out/QC-mac-default.metallib; xxd out/QC-mac-default.metallib | head -2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qcmetallib
+          path: out/QC-mac-default.metallib
+          retention-days: 1
