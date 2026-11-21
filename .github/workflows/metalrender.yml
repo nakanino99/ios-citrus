@@ -1,0 +1,32 @@
+name: metalrender
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Build a Metal render test (shaders by Xcode's Metal compiler, program over the Metal API)"
+        working-directory: userland/hakios-metal-lite/tools
+        run: |
+          set -e
+          mkdir -p outr
+          xcrun --sdk iphoneos metal -std=metal3.0 -mios-version-min=16.0 -c msl/tri.metal -o outr/tri.air
+          xcrun --sdk iphoneos metallib outr/tri.air -o outr/tri.metallib
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -fobjc-arc -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" -O1 \
+            -o outr/metal_test mtl_render_test.m -framework Foundation -framework Metal
+          codesign -f -s - outr/metal_test
+          ls -l outr
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metalrender
+          path: |
+            userland/hakios-metal-lite/tools/outr/metal_test
+            userland/hakios-metal-lite/tools/outr/tri.metallib
+          retention-days: 30
