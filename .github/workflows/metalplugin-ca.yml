@@ -1,0 +1,61 @@
+name: metalplugin-ca
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore the compiler build
+        uses: actions/cache/restore@v4
+        with:
+          path: userland/mesa-air/build
+          key: mesa-air-25.0.7-${{ hashFiles('userland/mesa-air/patches/**', 'userland/mesa-air/air/**', 'userland/mesa-air/hakios-drm/**', 'userland/mesa-air/mk-mesa-air.sh') }}
+          fail-on-cache-miss: true
+
+      - name: "Build HakiosMetal.bundle, the CoreAnimation variant, with the compiler inside"
+        working-directory: userland/hakios-metal-lite
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CLANG=$(xcrun --sdk iphoneos -f clang)
+          CXX=$(xcrun --sdk iphoneos -f clang++)
+          T="-arch arm64 -target arm64-apple-ios16.0 -isysroot $SDK"
+          M=$GITHUB_WORKSPACE/userland/mesa-air/build
+          MS=$M/mesa-25.0.7
+          MB=$M/build-softpipe-freedreno
+          DEFS=$(grep -m1 -A4 '^build src/freedreno/ir3/libfreedreno_ir3.a.p/ir3.c.o:' $MB/build.ninja | grep -m1 ' ARGS = ' | tr ' ' '\n' | grep '^-D' | tr '\n' ' ')
+          test -n "$DEFS"
+          INC="-isystem $MS/src -isystem $MS/include -isystem $MS/src/freedreno -isystem $MS/src/freedreno/common -isystem $MS/src/compiler -isystem $MS/src/compiler/nir -isystem $MS/src/compiler/air -isystem $MS/src/gallium/include -isystem $MB/src -isystem $MB/src/compiler -isystem $MB/src/compiler/nir -isystem $MB/src/freedreno -isystem $MB/src/freedreno/common -isystem $MB/src/freedreno/isa"
+          LIBS=""
+          for a in src/compiler/air/libair.a src/freedreno/ir3/libfreedreno_ir3.a src/freedreno/isa/libir3encode.a \
+                   src/freedreno/isa/libir3decode.a src/compiler/isaspec/libisaspec.a src/compiler/nir/libnir.a \
+                   src/compiler/libcompiler.a src/freedreno/fdl/libfreedreno_layout.a src/freedreno/common/libfreedreno_common.a \
+                   src/util/libmesa_util.a src/util/libmesa_util_sse41.a src/util/blake3/libblake3.a src/c11/impl/libmesa_util_c11.a; do
+            test -f $MB/$a || { echo "tidak ada: $a"; exit 1; }
+            LIBS="$LIBS $MB/$a"
+          done
+          grep -q "@interface HakiosMetalDevice" plugin/HakiosMetalCA.m || { echo "kelas HakiosMetalDevice tidak ada di HakiosMetalCA.m"; grep -n "^@interface" plugin/HakiosMetalCA.m | head -20; exit 1; }
+          grep -A1 NSPrincipalClass plugin/HakiosMetal.plist
+          rm -rf out/objca && mkdir -p out/objca out/dist-ca/HakiosMetal.bundle
+          for f in pm4 gpu command compute texture render link compiler metallib c_api fake_gpu iokit_transport; do
+            "$CXX" $T -std=c++17 -O2 -Wno-invalid-constexpr -I. -Iinclude -DHAKIOS_METAL_MESA $DEFS $INC -c $f.cpp -o out/objca/$f.o
+          done
+          rm -f out/libhakios-metal-ca.a && ar rcs out/libhakios-metal-ca.a out/objca/*.o
+          "$CLANG" $T -O2 -Wno-deprecated-declarations -bundle -DHAKIOS_METAL_GPU -Iinclude -Iplugin \
+            -o out/dist-ca/HakiosMetal.bundle/HakiosMetal plugin/HakiosMetalCA.m \
+            out/libhakios-metal-ca.a $LIBS -lc++ -lz -lm -lobjc \
+            -framework Foundation -framework Metal -framework IOKit -framework IOSurface -framework CoreFoundation
+          cp plugin/HakiosMetal.plist out/dist-ca/HakiosMetal.bundle/Info.plist
+          codesign -f -s - out/dist-ca/HakiosMetal.bundle
+          ls -lR out/dist-ca
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metalplugin-ca
+          path: userland/hakios-metal-lite/out/dist-ca
+          retention-days: 30
