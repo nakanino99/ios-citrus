@@ -1798,7 +1798,7 @@ int main(int argc, char** argv) {
                     bool same = false;
                     std::string text = compareCompiled(compiled->kernel, *p.fixture, &same);
                     report(same, std::string("compile ") + p.name + " on the phone: " + text);
-                    if (same && p.fixture == &kernels::tex_fill_air) {
+                    if (p.fixture == &kernels::tex_fill_air) {
                         texFill(compiled->kernel, PixelFormat::kR32Uint, "R32Uint", 64, 32, local88, 8, 4, c2,
                                 "dispatch of tex_fill compiled on the phone, R32Uint 64x32, c = 0x6789");
                     }
