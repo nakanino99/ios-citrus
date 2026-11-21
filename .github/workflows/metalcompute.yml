@@ -1,0 +1,34 @@
+name: metalcompute
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Build a Metal compute test (kernel by Xcode's Metal compiler, program over the Metal API)"
+        working-directory: userland/hakios-metal-lite/tools
+        run: |
+          set -e
+          xcrun --sdk iphoneos metal --version || { echo "tidak ada kompiler Metal di runner ini"; exit 1; }
+          mkdir -p out
+          xcrun --sdk iphoneos metal -std=metal3.0 -mios-version-min=16.0 -c msl/fill3.metal -o out/fill3.air
+          xcrun --sdk iphoneos metallib out/fill3.air -o out/fill3.metallib
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -fobjc-arc -arch arm64 -target arm64-apple-ios16.0 -isysroot "$SDK" -O1 \
+            -o out/metal_test mtl_compute_test.m -framework Foundation -framework Metal
+          codesign -f -s - out/metal_test
+          ls -l out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metalcompute
+          path: |
+            userland/hakios-metal-lite/tools/out/metal_test
+            userland/hakios-metal-lite/tools/out/fill3.metallib
+            userland/hakios-metal-lite/tools/out/fill3.air
+          retention-days: 30
