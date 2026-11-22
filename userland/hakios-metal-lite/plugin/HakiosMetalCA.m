@@ -3784,7 +3784,8 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 								     (unsigned)[descriptor width], (unsigned)[descriptor height], (unsigned)usage);
 		}
 	}
-	if (texture == NULL && IOSurfaceGetPlaneCount(surface) <= 1 && IOSurfaceGetBytesPerRow(surface) % 64 != 0 &&
+	if (texture == NULL && IOSurfaceGetPlaneCount(surface) <= 1 &&
+	    (IOSurfaceGetBytesPerRow(surface) % 64 != 0 || IOSurfaceGetBytesPerElement(surface) != 4) &&
 	    ([descriptor usage] == MTLTextureUsageUnknown ||
 	     ([descriptor usage] & ~MTLTextureUsagePixelFormatView & ~MTLTextureUsageShaderRead & ~MTLTextureUsageRenderTarget &
 	      ~MTLTextureUsageShaderWrite) == 0) &&
@@ -3795,7 +3796,8 @@ hm_compress(MTLTextureDescriptor *descriptor, MTLTextureUsage usage)
 		 * command buffer completes (-hakiosWriteBackShadow); a render target is given wherever the format takes one,
 		 * as over an aligned surface above */
 		const MTLTextureUsage writes = [descriptor usage] & MTLTextureUsageShaderWrite;
-		MTLTextureUsage copyUsage = MTLTextureUsageShaderRead | writes | MTLTextureUsageRenderTarget;
+		MTLTextureUsage copyUsage = MTLTextureUsageShaderRead | writes |
+					    (IOSurfaceGetBytesPerRow(surface) % 64 != 0 ? MTLTextureUsageRenderTarget : ([descriptor usage] & MTLTextureUsageRenderTarget));
 		hakios_metal_texture *copy = hakios_metal_texture_new_levels(_gpu, 2, (unsigned)[descriptor pixelFormat], (unsigned)[descriptor width],
 									     (unsigned)[descriptor height], 1, (unsigned)copyUsage);
 
