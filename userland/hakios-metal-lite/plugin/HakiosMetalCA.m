@@ -171,6 +171,85 @@ hm_print(const char *fmt, ...)
 		}							\
 	} while (0)
 
+#include <IOSurface/IOSurfaceRef.h>
+#include <libkern/OSCacheControl.h>
+
+/* (topaz) boot-arg metal_rowcheck: just before a drawable is presented, look at three columns of every row of its surface
+ * and say which runs of rows are black in all three (y+height), to tell a surface that was drawn black from a display
+ * that shows it so. Run it with metal_noubwc (compressed surfaces cannot be read) and a bright wallpaper. */
+static void
+hm_rowcheck(id drawable)
+{
+	static int on = -1;
+	static unsigned frames, bad, printed;
+	id texture;
+	IOSurfaceRef surface;
+
+	if (on < 0) {
+		char args[1024] = {0};
+		size_t size = sizeof(args) - 1;
+
+		on = sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, "metal_rowcheck") != NULL;
+	}
+	if (!on || drawable == nil || ![drawable respondsToSelector:@selector(texture)]) {
+		return;
+	}
+	texture = [drawable performSelector:@selector(texture)];
+	if (texture == nil || ![texture respondsToSelector:@selector(iosurface)]) {
+		return;
+	}
+	surface = (IOSurfaceRef)[texture performSelector:@selector(iosurface)];
+	if (surface == NULL || IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0) {
+		return;
+	}
+	{
+		size_t w = IOSurfaceGetWidth(surface), h = IOSurfaceGetHeight(surface), bpr = IOSurfaceGetBytesPerRow(surface);
+		const uint8_t *base = (const uint8_t *)IOSurfaceGetBaseAddress(surface);
+
+		if (base != NULL && IOSurfaceGetBytesPerElement(surface) == 4 && w >= 64 && h >= 64) {
+			size_t cols[3] = { w / 8, w / 2, w - w / 8 };
+			size_t runStart = (size_t)-1, runs = 0, at = 0;
+			char where[400] = "";
+
+			for (size_t y = 0; y <= h; y++) {
+				BOOL black = NO;
+
+				if (y < h) {
+					black = YES;
+					for (int c = 0; c < 3 && black; c++) {
+						const uint8_t *px = base + y * bpr + cols[c] * 4;
+
+						sys_dcache_flush((void *)px, 4);
+						if ((*(const uint32_t *)px & 0x00ffffffu) != 0) {
+							black = NO;
+						}
+					}
+				}
+				if (black) {
+					if (runStart == (size_t)-1) runStart = y;
+				} else if (runStart != (size_t)-1) {
+					size_t len = y - runStart;
+
+					if (len >= 4 && len < h / 2) {
+						runs++;
+						if (at + 40 < sizeof(where)) at += (size_t)snprintf(where + at, sizeof(where) - at, " %zu+%zu", runStart, len);
+					}
+					runStart = (size_t)-1;
+				}
+			}
+			frames++;
+			if (runs) bad++;
+			if (runs && printed < 150) {
+				printed++;
+				hm_print("rowcheck: frame %u: %zu runs of black rows (y+height):%s [surface %zux%zu, %zu bytes a row]\n", frames, runs, where, w, h, bpr);
+			} else if (frames == 1 || frames % 300 == 0) {
+				hm_print("rowcheck: %u frames checked, %u with black runs [surface %zux%zu, %zu bytes a row]\n", frames, bad, w, h, bpr);
+			}
+		}
+	}
+	IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+}
+
 /*
  * Who sent the selector. backtrace(3) gives the frames; the ones inside this image, libobjc and CoreFoundation (the
  * forwarding machinery itself) are skipped, and the first frame beyond them is named by image and address, the
@@ -6485,6 +6564,7 @@ hm_completed(hakios_metal_cb *cb, void *context)
 	[drawable retain];
 	[self addCompletedHandler:^(id<MTLCommandBuffer> cb) {
 		(void)cb;
+		hm_rowcheck(drawable);
 		[drawable present];
 		[drawable release];
 		hm_fps_note(YES, 0, 0, NULL);
