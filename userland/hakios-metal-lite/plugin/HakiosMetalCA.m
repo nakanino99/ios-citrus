@@ -110,7 +110,8 @@
 /* --- printing ----------------------------------------------------------------------------------------------- */
 
 static void hm_print(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static int hm_print_fd = -1;    /* where hm_print writes: stderr, the console, or (metal_m2v=1) a copy of stderr kept aside */
+static int hm_print_fd = -1;
+static bool hm_boot_arg_set(const char *what);    /* where hm_print writes: stderr, the console, or (metal_m2v=1) a copy of stderr kept aside */
 
 /* To stderr, as one write: a launchd job's stderr is the console (userland/mkjobs.py sets StandardErrorPath) and its
  * stdout is nowhere, so the window server's lines -- the client this plug-in is for -- reached no log while they went
@@ -1641,6 +1642,9 @@ hm_ca_nearest(NSString *frag)
 	if (w == nil) {
 		return nil;
 	}
+	for (int pass = 0; pass < 2 && best == nil; pass++) {
+	const BOOL loose = pass == 1;   /* (topaz) metal_loose=1: no candidate of the kind asked for: any kind, nearest by inputs and flags */
+	if (loose && !hm_boot_arg_set("metal_loose=1")) break;
 	for (NSString *candidate in hm_ca_frag_vert) {
 		if (![candidate hasPrefix:prefix] || hm_ca_variants[candidate] == nil) {
 			continue;
@@ -1650,7 +1654,7 @@ hm_ca_nearest(NSString *frag)
 		BOOL same = h != nil;
 		NSInteger cost = 0;
 
-		for (NSUInteger i = 1; same && i <= 6; i++) {
+		for (NSUInteger i = loose ? 2 : 1; same && i <= 6; i++) {
 			same = [part(w, i, want) isEqualToString:part(h, i, have)];
 		}
 		if (!same) {
@@ -1676,6 +1680,7 @@ hm_ca_nearest(NSString *frag)
 			best = candidate;
 			bestCost = cost;
 		}
+	}
 	}
 	@synchronized (told) {
 		if (told[frag] == nil) {
