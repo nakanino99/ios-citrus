@@ -1,0 +1,17 @@
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -564,6 +564,14 @@
+ 	if (s->bytesPerRow < (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
+ 		return kIOReturnBadArgument;
+ 	}
++	/*
++	 * 4-byte surfaces go to the GPU only with rows 64-byte aligned (RedwoodGPU surfaceBuffer):
++	 * QuartzCore asks for 1080 * 4 = 4320, so the row is rounded up here and the client reads
++	 * the real row size back from the reply.
++	 */
++	if (s->bytesPerElement == 4 && s->elementWidth == 1 && s->elementHeight == 1) {
++		s->bytesPerRow = (s->bytesPerRow + SWEET_SURFACE_ROW_ALIGN - 1) & ~(uint32_t)(SWEET_SURFACE_ROW_ALIGN - 1);
++	}
+ 	end = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * sweet_div_up(s->height, s->elementHeight);
+ 
+ 	OSArray *planes = one_plane ? NULL : OSDynamicCast(OSArray, props->getObject("IOSurfacePlaneInfo"));
