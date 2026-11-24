@@ -1,0 +1,42 @@
+--- a/iokit/Kernel/arm/RedwoodGPU.cpp
++++ b/iokit/Kernel/arm/RedwoodGPU.cpp
+@@ -868,11 +868,14 @@
+ 	struct gpu_buffer * b = NULL;
+ 	IOMemoryDescriptor * memory;
+ 	uint64_t size, began = mach_absolute_time();
++	static uint32_t big_told;
++#define SB_WHY(s, why) do { if ((s)->allocSize > (8u << 20) && big_told++ < 200) IOLog("RedwoodGPU: big surface %u (%ux%u bpr %u, %u bytes, pool %d, wrapped %d, identity %d) refused: %s\n", (s)->id, (s)->width, (s)->height, (s)->bytesPerRow, (s)->allocSize, (int)(s)->gpuPool, (int)(s)->wrapped, (int)redwood_gpu_identity(), why); } while (0)
+ 
+ 	if (s == NULL) {
+ 		return kIOReturnNotFound;
+ 	}
+ 	if (s->memory == NULL || s->kernelAddress() == 0) {
++		SB_WHY(s, "no memory or no kernel address");
+ 		s->release();
+ 		return kIOReturnUnsupported;
+ 	}
+@@ -893,6 +896,7 @@
+ 				    "scanout slot %d%s\n", s->id, s->width, s->height, s->allocSize, (unsigned long long)phys,
+ 				    (unsigned long long)length, s->scanoutSlot, s->wrapped ? ", client memory" : "");
+ 			}
++			SB_WHY(s, "identity: not contiguous, over 64GB, or wrapDelta");
+ 			s->release();
+ 			return kIOReturnUnsupported;    /* (eagl.c then fills a texture from it and reads frames back) */
+ 		}
+@@ -911,6 +915,7 @@
+ 		}
+ 	}
+ 	if (!s->gpuPool && (s->bytesPerElement != 4 || s->planeCount > 1 || (s->bytesPerRow & 63) != 0)) {
++		SB_WHY(s, "not BGRA or rows not 64-aligned");
+ 		s->release();
+ 		return kIOReturnUnsupported;
+ 	}
+@@ -926,6 +931,8 @@
+ 		if (bmd != NULL && bmd->getLength() >= want) {
+ 			size = want;
+ 		} else if (!s->gpuPool) {
++			SB_WHY(s, "descriptor lacks 64 guard rows");
++			if (s->allocSize > (8u << 20) && big_told < 200) IOLog("RedwoodGPU: surface %u guard rows: bmd %p length %llu want %llu\n", s->id, bmd, bmd ? (unsigned long long)bmd->getLength() : 0ull, (unsigned long long)want);
+ 			s->release();
+ 			return kIOReturnUnsupported;
+ 		}
